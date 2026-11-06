@@ -1103,6 +1103,67 @@ describe("session.compaction.process", () => {
   )
 
   itCompaction.instance(
+    "passes agent and manual flag to the compaction hook",
+    () => {
+      let seen: { sessionID?: string; auto?: boolean; agent?: { name?: string } } | undefined
+      const plugin = Layer.mock(Plugin.Service)({
+        trigger: <Name extends string, Input, Output>(name: Name, input: Input, output: Output) => {
+          if (name === "experimental.session.compacting") seen = input as typeof seen
+          return Effect.succeed(output)
+        },
+        list: () => Effect.succeed([]),
+        init: () => Effect.void,
+      })
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        const msg = yield* createUserMessage(session.id, "hello")
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        yield* SessionCompaction.use.process({
+          parentID: msg.id,
+          messages: msgs,
+          sessionID: session.id,
+          auto: false,
+        })
+        expect(seen?.sessionID).toBe(session.id)
+        expect(seen?.auto).toBe(false)
+        expect(seen?.agent?.name).toBe("build")
+      }).pipe(withCompaction({ plugin }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "passes agent info and auto flag to the autocontinue hook",
+    () => {
+      let seen: { auto?: boolean; agentInfo?: { name?: string } } | undefined
+      const plugin = Layer.mock(Plugin.Service)({
+        trigger: <Name extends string, Input, Output>(name: Name, input: Input, output: Output) => {
+          if (name === "experimental.compaction.autocontinue") seen = input as typeof seen
+          return Effect.succeed(output)
+        },
+        list: () => Effect.succeed([]),
+        init: () => Effect.void,
+      })
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        const msg = yield* createUserMessage(session.id, "hello")
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        yield* SessionCompaction.use.process({
+          parentID: msg.id,
+          messages: msgs,
+          sessionID: session.id,
+          auto: true,
+        })
+        expect(seen?.auto).toBe(true)
+        expect(seen?.agentInfo?.name).toBe("build")
+      }).pipe(withCompaction({ plugin }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
     "allows plugins to disable synthetic continue prompt",
     Effect.gen(function* () {
       const ssn = yield* SessionNs.Service
@@ -1460,6 +1521,45 @@ describe("session.compaction.process", () => {
           provider: ProviderTest.fake({ model: createModel({ context: 4_000, output: 1_000 }) }),
         }),
       )
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "keeps the session system prompt and appends compaction instructions",
+    () => {
+      const stub = llm()
+      let system: string[] = []
+      let messages = ""
+      let agent = ""
+      stub.push(
+        reply("summary", (input) => {
+          system = input.system
+          messages = JSON.stringify(input.messages)
+          agent = input.agent.name
+        }),
+      )
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "hello")
+        yield* createCompactionMarker(session.id)
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({
+          parentID: parent!,
+          messages: msgs,
+          sessionID: session.id,
+          auto: false,
+          system: ["SESSION_SYSTEM"],
+        })
+
+        expect(agent).toBe("build")
+        expect(system).toEqual(["SESSION_SYSTEM"])
+        expect(messages).toContain("context summarization agent")
+      }).pipe(withCompaction({ llm: stub.llmLayer }))
     },
     { git: true },
   )

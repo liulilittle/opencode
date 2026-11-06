@@ -419,6 +419,53 @@ describe("EventV2", () => {
     }),
   )
 
+  it.effect("allocates after the event table when the sequence row is stale", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const aggregateID = EventV2.ID.create()
+
+      yield* db
+        .insert(EventSequenceTable)
+        .values({ aggregate_id: aggregateID, seq: 1 })
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(EventTable)
+        .values(
+          [2, 3, 4, 5].map((seq) => ({
+            id: EventV2.ID.create(),
+            aggregate_id: aggregateID,
+            seq,
+            type: EventV2.versionedType(SyncMessage.type, 1),
+            data: { id: aggregateID, text: `stale-${seq}` },
+          })),
+        )
+        .run()
+        .pipe(Effect.orDie)
+
+      expect(yield* EventV2.latestSequence(db, aggregateID)).toBe(5)
+
+      const event = yield* events.publish(SyncMessage, { id: aggregateID, text: "fresh" })
+      const rows = yield* db
+        .select()
+        .from(EventTable)
+        .where(eq(EventTable.aggregate_id, aggregateID))
+        .all()
+        .pipe(Effect.orDie)
+      const sequence = yield* db
+        .select()
+        .from(EventSequenceTable)
+        .where(eq(EventSequenceTable.aggregate_id, aggregateID))
+        .get()
+        .pipe(Effect.orDie)
+
+      expect(event.durable?.seq).toBe(6)
+      expect(rows.map((row) => row.seq)).toEqual([2, 3, 4, 5, 6])
+      expect(sequence?.seq).toBe(6)
+    }),
+  )
+
   it.effect("replays durable aggregate events after a sequence and tails new events", () =>
     Effect.gen(function* () {
       const events = yield* EventV2.Service

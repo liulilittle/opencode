@@ -10,6 +10,7 @@ import { Agent } from "../agent/agent"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
+import { Provider } from "@/provider/provider"
 import { Effect, Exit, Schema, Scope } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -49,6 +50,14 @@ const BaseParameterFields = {
       "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
   }),
   command: Schema.optional(Schema.String).annotate({ description: "The command that triggered this task" }),
+  model: Schema.optional(Schema.String).annotate({
+    description:
+      "Optional model for the subagent in provider/model format. Defaults to the agent's configured model or the parent model.",
+  }),
+  variant: Schema.optional(Schema.String).annotate({
+    description:
+      "Optional thinking depth/variant for the subagent (for example low, medium, high, max). Omit to inherit the default.",
+  }),
 }
 
 const BaseParameters = Schema.Struct(BaseParameterFields)
@@ -176,12 +185,14 @@ export const TaskTool = Tool.define(
         Effect.orDie,
       )
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
-      const variant = msg.info.variant
+      const requestedModel = params.model ? Provider.parseModel(params.model) : undefined
+      const variant = params.variant ?? (requestedModel || next.model ? undefined : msg.info.variant)
 
-      const model = next.model ?? {
-        modelID: msg.info.modelID,
-        providerID: msg.info.providerID,
-      }
+      const model = requestedModel ??
+        next.model ?? {
+          modelID: msg.info.modelID,
+          providerID: msg.info.providerID,
+        }
       const metadata = {
         parentSessionId: ctx.sessionID,
         sessionId: nextSession.id,
@@ -206,7 +217,7 @@ export const TaskTool = Tool.define(
             modelID: model.modelID,
             providerID: model.providerID,
           },
-          variant: next.model ? undefined : variant,
+          variant,
           agent: next.name,
           parts,
         })
@@ -238,6 +249,11 @@ export const TaskTool = Tool.define(
               {
                 type: "text",
                 synthetic: true,
+                metadata: {
+                  platform: "task",
+                  taskID: nextSession.id,
+                  taskState: state,
+                },
                 text: renderOutput({
                   sessionID: nextSession.id,
                   state,

@@ -1,4 +1,4 @@
-import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+﻿import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
@@ -20,6 +20,7 @@ import { MessageV2 } from "../../src/session/message-v2"
 import { SessionID, MessageID } from "../../src/session/schema"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Permission } from "@/permission"
+import { Plugin } from "../../src/plugin"
 import { LLMAISDK } from "@/session/llm/ai-sdk"
 import { Session as SessionNs } from "@/session/session"
 import { ProviderV2 } from "@opencode-ai/core/provider"
@@ -78,11 +79,13 @@ function llmLayerWithExecutor(
   options: {
     executor?: Layer.Layer<RequestExecutor.Service>
     flags?: Partial<RuntimeFlags.Info>
+    plugin?: Layer.Layer<Plugin.Service>
   } = {},
 ) {
   return AppNodeBuilder.build(LLM.node, [
     [RuntimeFlags.node, RuntimeFlags.layer(options.flags)],
     ...(options.executor ? ([[LayerNodePlatform.requestExecutor, options.executor]] as const) : []),
+    ...(options.plugin ? ([[Plugin.node, options.plugin]] as const) : []),
   ])
 }
 
@@ -388,7 +391,7 @@ describe("session.llm.ai-sdk adapter", () => {
 
   test("reuses adapter state cleanly across streams once finish has fired", async () => {
     // adapterState() is meant to be per-stream, but the only thing finish currently clears
-    // is toolNames — step, text counters, and the current text/reasoning IDs all leak
+    // is toolNames 鈥?step, text counters, and the current text/reasoning IDs all leak
     // forward. A caller that reuses a state across two streams sees text-1/reasoning-1/
     // step index 1 on the second stream's first events. The test pins the intended
     // contract: after finish, the same state can be reused and starts fresh.
@@ -451,7 +454,7 @@ describe("session.llm.ai-sdk adapter", () => {
 
   // Anthropic emits cache write counts in providerMetadata.anthropic.cacheCreationInputTokens
   // rather than usage.inputTokenDetails.cacheWriteTokens. Session.getUsage falls back to the
-  // metadata path — but only if the adapter preserves providerMetadata on step-finish.
+  // metadata path 鈥?but only if the adapter preserves providerMetadata on step-finish.
   test("preserves providerMetadata on step-finish so Anthropic cache writes survive getUsage", async () => {
     const events = await adapt([
       {
@@ -2261,6 +2264,149 @@ describe("session.llm.stream", () => {
           },
         },
       }),
+    },
+  )
+})
+
+describe("session.llm.post-transform preflight", () => {
+  it.instance(
+    "rejects a request that exceeds the model limit after plugin transforms",
+    () =>
+      Effect.gen(function* () {
+        const fixture = loadFixture("openai", "gpt-5.2")
+        const resolved = yield* Provider.use.getModel(ProviderV2.ID.openai, ModelV2.ID.make(fixture.model.id))
+        expect(resolved.limit.context).toBe(1_000)
+        const sessionID = SessionID.make("session-post-transform-overflow")
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+
+        const exit = yield* LLM.Service.use((svc) =>
+          svc
+            .stream({
+              user: {
+                id: MessageID.make("msg_user-post-transform-overflow"),
+                sessionID,
+                role: "user",
+                time: { created: Date.now() },
+                agent: agent.name,
+                model: { providerID: ProviderV2.ID.openai, modelID: resolved.id },
+              } satisfies SessionV1.User,
+              sessionID,
+              model: resolved,
+              agent,
+              system: ["x".repeat(200_000)],
+              messages: [{ role: "user", content: "Hello" }],
+              tools: {},
+            })
+            .pipe(Stream.runDrain),
+        ).pipe(Effect.exit)
+
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) {
+          expect(Cause.squash(exit.cause)).toBeInstanceOf(SessionV1.ContextOverflowError)
+        }
+      }),
+    {
+      config: () => {
+        const fixture = loadFixture("openai", "gpt-5.2")
+        const base = openAIConfig(fixture.model, `${state.server!.url.origin}/v1`)
+        return {
+          ...base,
+          provider: {
+            ...base.provider,
+            openai: {
+              ...base.provider!.openai!,
+              models: {
+                [fixture.model.id]: {
+                  ...configModel(fixture.model),
+                  limit: { context: 1_000, input: 900, output: 100 },
+                } as ConfigModel,
+              },
+            },
+          },
+        }
+      },
+    },
+  )
+})
+
+const thinkingPlugin = Layer.mock(Plugin.Service)({
+  trigger: <Name extends string, Input, Output>(name: Name, _input: Input, output: Output) => {
+    if (name === "experimental.chat.thinking.transform") {
+      ;(output as { tail?: string }).tail = "THINKING_NUDGE"
+    }
+    return Effect.succeed(output)
+  },
+  list: () => Effect.succeed([]),
+  init: () => Effect.void,
+})
+
+describe("session.llm.thinking transform", () => {
+  it.instance(
+    "appends the plugin thinking tail as the last user message",
+    () =>
+      Effect.gen(function* () {
+        const fixture = loadFixture("vivgrid", "gemini-3.1-pro-preview")
+        const request = waitRequest(
+          "/chat/completions",
+          new Response(createChatStream("Hello"), {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          }),
+        )
+        const resolved = yield* Provider.use.getModel(
+          ProviderV2.ID.make("vivgrid"),
+          ModelV2.ID.make(fixture.model.id),
+        )
+        const sessionID = SessionID.make("session-thinking-tail")
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+
+        yield* drainWith(llmLayerWithExecutor({ plugin: thinkingPlugin }), {
+          user: {
+            id: MessageID.make("msg_user-thinking-tail"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: agent.name,
+            model: { providerID: ProviderV2.ID.make("vivgrid"), modelID: resolved.id },
+          } satisfies SessionV1.User,
+          sessionID,
+          model: resolved,
+          agent,
+          system: ["You are a helpful assistant."],
+          messages: [{ role: "user", content: "Hello" }],
+          tools: {},
+        })
+
+        const capture = yield* Effect.promise(() => request)
+        const messages = capture.body.messages as Array<{ role: string; content: unknown }>
+        expect(messages.at(-1)?.role).toBe("user")
+        expect(JSON.stringify(messages.at(-1))).toContain("THINKING_NUDGE")
+      }),
+    {
+      config: () => {
+        const fixture = loadFixture("vivgrid", "gemini-3.1-pro-preview")
+        return {
+          enabled_providers: ["vivgrid"],
+          provider: {
+            vivgrid: {
+              name: "OpenCode Test",
+              npm: "@ai-sdk/openai-compatible",
+              models: { [fixture.model.id]: configModel(fixture.model) as ConfigModel },
+              options: { apiKey: "test-key", baseURL: `${state.server!.url.origin}/v1` },
+            },
+          },
+        }
+      },
     },
   )
 })

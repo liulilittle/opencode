@@ -28,6 +28,7 @@ import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { LLMAISDK } from "./llm/ai-sdk"
 import { LLMNativeRuntime } from "./llm/native-runtime"
 import { LLMRequestPrep } from "./llm/request"
+import { estimateRequestTokens, usable } from "./overflow"
 
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
@@ -110,6 +111,38 @@ const live: Layer.Layer<
         flags,
         isWorkflow,
       })
+
+      const thinking = yield* plugin.trigger(
+        "experimental.chat.thinking.transform",
+        { sessionID: input.sessionID, messageID: input.user.id, model: input.model, agent: input.agent },
+        { tail: "" },
+      )
+      if (thinking.tail) {
+        prepared.messages.push({
+          role: "user",
+          content: [{ type: "text", text: thinking.tail }],
+        })
+      }
+
+      const contextLimit = usable({ cfg, model: input.model, outputTokenMax: flags.outputTokenMax })
+      const systemInMessages = prepared.messages.some((message) => message.role === "system")
+      const requestTokens = estimateRequestTokens({
+        system: systemInMessages ? [] : prepared.system,
+        messages: prepared.messages,
+        tools: prepared.tools,
+      })
+      if (contextLimit > 0 && requestTokens > contextLimit) {
+        yield* Effect.logWarning("[context] transformed request would exceed model limit", {
+          "session.id": input.sessionID,
+          tokens: requestTokens,
+          limit: contextLimit,
+        })
+        return yield* Effect.fail(
+          new SessionV1.ContextOverflowError({
+            message: "Request exceeds the model context limit after plugin transforms",
+          }),
+        )
+      }
 
       // Wire up toolExecutor for DWS workflow models so that tool calls
       // from the workflow service are executed via opencode's tool system

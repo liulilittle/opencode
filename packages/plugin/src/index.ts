@@ -23,6 +23,23 @@ export type ProviderContext = {
   options: Record<string, any>
 }
 
+export type AgentInfo = {
+  name: string
+  description?: string
+  mode: "subagent" | "primary" | "all"
+  native?: boolean
+  hidden?: boolean
+  topP?: number
+  temperature?: number
+  color?: string
+  permission?: unknown
+  model?: { modelID: string; providerID: string }
+  variant?: string
+  prompt?: string
+  options?: Record<string, unknown>
+  steps?: number
+}
+
 export type WorkspaceInfo = {
   id: string
   type: string
@@ -238,6 +255,7 @@ export interface Hooks {
       model?: { providerID: string; modelID: string }
       messageID?: string
       variant?: string
+      agentInfo?: AgentInfo
     },
     output: { message: UserMessage; parts: Part[] },
   ) => Promise<void>
@@ -245,7 +263,14 @@ export interface Hooks {
    * Modify parameters sent to LLM
    */
   "chat.params"?: (
-    input: { sessionID: string; agent: string; model: Model; provider: ProviderContext; message: UserMessage },
+    input: {
+      sessionID: string
+      agent: string
+      agentInfo?: AgentInfo
+      model: Model
+      provider: ProviderContext
+      message: UserMessage
+    },
     output: {
       temperature: number
       topP: number
@@ -255,7 +280,14 @@ export interface Hooks {
     },
   ) => Promise<void>
   "chat.headers"?: (
-    input: { sessionID: string; agent: string; model: Model; provider: ProviderContext; message: UserMessage },
+    input: {
+      sessionID: string
+      agent: string
+      agentInfo?: AgentInfo
+      model: Model
+      provider: ProviderContext
+      message: UserMessage
+    },
     output: { headers: Record<string, string> },
   ) => Promise<void>
   "permission.ask"?: (input: Permission, output: { status: "ask" | "deny" | "allow" }) => Promise<void>
@@ -280,7 +312,7 @@ export interface Hooks {
     },
   ) => Promise<void>
   "experimental.chat.messages.transform"?: (
-    input: {},
+    input: { sessionID?: string; agent?: AgentInfo },
     output: {
       messages: {
         info: Message
@@ -289,10 +321,21 @@ export interface Hooks {
     },
   ) => Promise<void>
   "experimental.chat.system.transform"?: (
-    input: { sessionID?: string; model: Model },
+    input: { sessionID?: string; model: Model; agent?: AgentInfo },
     output: {
       system: string[]
     },
+  ) => Promise<void>
+  /**
+   * Called after the request is prepared and before the context preflight.
+   * The returned `tail` is appended as a synthetic user message at the very
+   * end of the request, giving plugins a recency channel. It is ephemeral and
+   * never persisted to session history. Hosts without this hook simply ignore
+   * it, so plugins must treat it as optional.
+   */
+  "experimental.chat.thinking.transform"?: (
+    input: { sessionID: string; messageID: string; model: Model; agent?: AgentInfo },
+    output: { tail?: string },
   ) => Promise<void>
   "experimental.provider.small_model"?: (input: { provider: ProviderV2 }, output: { model?: ModelV2 }) => Promise<void>
   /**
@@ -303,7 +346,7 @@ export interface Hooks {
    * - `prompt`: If set, replaces the default compaction prompt entirely
    */
   "experimental.session.compacting"?: (
-    input: { sessionID: string },
+    input: { sessionID: string; agent?: AgentInfo; auto?: boolean },
     output: { context: string[]; prompt?: string },
   ) => Promise<void>
   /**
@@ -317,6 +360,8 @@ export interface Hooks {
     input: {
       sessionID: string
       agent: string
+      agentInfo?: AgentInfo
+      auto?: boolean
       model: Model
       provider: ProviderContext
       message: UserMessage

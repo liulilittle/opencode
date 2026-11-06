@@ -174,6 +174,7 @@ export interface Interface {
     sessionID: SessionID
     auto: boolean
     overflow?: boolean
+    system?: string[]
   }) => Effect.Effect<"continue" | "stop">
   readonly create: (input: {
     sessionID: SessionID
@@ -322,6 +323,7 @@ const layer = Layer.effect(
       sessionID: SessionID
       auto: boolean
       overflow?: boolean
+      system?: string[]
     }) {
       const parent = input.messages.findLast((m) => m.info.id === input.parentID)
       if (!parent || parent.info.role !== "user") {
@@ -355,10 +357,12 @@ const layer = Layer.effect(
         }
       }
 
-      const agent = yield* agents.get("compaction")
-      const model = agent.model
-        ? yield* provider.getModel(agent.model.providerID, agent.model.modelID).pipe(Effect.orDie)
+      const compactionAgent = yield* agents.get("compaction")
+      const agent = (yield* agents.get(userMessage.agent)) ?? compactionAgent
+      const model = compactionAgent.model
+        ? yield* provider.getModel(compactionAgent.model.providerID, compactionAgent.model.modelID).pipe(Effect.orDie)
         : yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID).pipe(Effect.orDie)
+      const system = [...(input.system ?? [])]
       const cfg = yield* config.get()
       const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
       const prior = completedCompactions(history)
@@ -372,13 +376,13 @@ const layer = Layer.effect(
       // Allow plugins to inject context or replace compaction prompt.
       const compacting = yield* plugin.trigger(
         "experimental.session.compacting",
-        { sessionID: input.sessionID },
+        { sessionID: input.sessionID, agent, auto: input.auto },
         { context: [], prompt: undefined },
       )
       const limit = usable({ cfg, model, outputTokenMax: flags.outputTokenMax })
       let head = selected.head
       let msgs = structuredClone(head)
-      yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+      yield* plugin.trigger("experimental.chat.messages.transform", { sessionID: input.sessionID, agent }, { messages: msgs })
       let conversation = msgs.map(serialize).filter(Boolean).join("\n\n")
       const build = () =>
         compacting.prompt ??
@@ -388,6 +392,7 @@ const layer = Layer.effect(
             context: [conversation],
           }),
           ...compacting.context,
+          compactionAgent.prompt,
         ]
           .filter(Boolean)
           .join("\n\n")
@@ -398,7 +403,7 @@ const layer = Layer.effect(
         if (all.length <= 1) break
         head = head.slice(all[1]!.start)
         msgs = structuredClone(head)
-        yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+        yield* plugin.trigger("experimental.chat.messages.transform", { sessionID: input.sessionID, agent }, { messages: msgs })
         conversation = msgs.map(serialize).filter(Boolean).join("\n\n")
         nextPrompt = build()
         dropped++
@@ -458,7 +463,7 @@ const layer = Layer.effect(
         agent,
         sessionID: input.sessionID,
         tools: {},
-        system: [],
+        system,
         messages: [
           {
             role: "user",
@@ -533,6 +538,8 @@ const layer = Layer.effect(
               {
                 sessionID: input.sessionID,
                 agent: userMessage.agent,
+                agentInfo: agent,
+                auto: input.auto,
                 model: yield* provider
                   .getModel(userMessage.model.providerID, userMessage.model.modelID)
                   .pipe(Effect.orDie),

@@ -69,7 +69,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   const systemPrefix = snapshot([], system)
   yield* input.plugin.trigger(
     "experimental.chat.system.transform",
-    { sessionID: input.sessionID, model: input.model },
+    { sessionID: input.sessionID, model: input.model, agent: input.agent },
     { system },
   )
   if (restoreSystem(system, systemPrefix) > 0) {
@@ -120,6 +120,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     {
       sessionID: input.sessionID,
       agent: input.agent.name,
+      agentInfo: input.agent,
       model: input.model,
       provider: input.provider,
       message: input.user,
@@ -140,6 +141,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     {
       sessionID: input.sessionID,
       agent: input.agent.name,
+      agentInfo: input.agent,
       model: input.model,
       provider: input.provider,
       message: input.user,

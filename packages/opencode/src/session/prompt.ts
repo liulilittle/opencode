@@ -55,8 +55,7 @@ import { eq } from "drizzle-orm"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionReminders } from "./reminders"
 import { restoreMessages, snapshot } from "./prefix"
-import { Token } from "@/util/token"
-import { usable } from "./overflow"
+import { estimateRequestTokens, usable } from "./overflow"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
 
@@ -1004,6 +1003,7 @@ const layer = Layer.effect(
         {
           sessionID: input.sessionID,
           agent: input.agent,
+          agentInfo: ag,
           model: input.model,
           messageID: input.messageID,
           variant: input.variant,
@@ -1142,6 +1142,26 @@ const layer = Layer.effect(
             }).pipe(Effect.ignore, Effect.forkIn(scope))
 
           const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
+          const agent = yield* agents.get(lastUser.agent)
+          if (!agent) {
+            const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
+            const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
+            const error = new NamedError.Unknown({ message: `Agent not found: "${lastUser.agent}".${hint}` })
+            yield* events.publish(Session.Event.Error, { sessionID, error: error.toObject() })
+            throw error
+          }
+          const [skills, env, instructions, mcpInstructions] = yield* Effect.all([
+            sys.skills(agent),
+            sys.environment(model),
+            instruction.system().pipe(Effect.orDie),
+            sys.mcp(agent, session.permission),
+          ])
+          const system = [
+            ...env,
+            ...instructions,
+            ...(mcpInstructions ? [mcpInstructions] : []),
+            ...(skills ? [skills] : []),
+          ]
           const task = tasks.pop()
 
           if (task?.type === "subtask") {
@@ -1156,6 +1176,7 @@ const layer = Layer.effect(
               sessionID,
               auto: task.auto,
               overflow: task.overflow,
+              system,
             })
             if (result === "stop") break
             continue
@@ -1170,14 +1191,6 @@ const layer = Layer.effect(
             continue
           }
 
-          const agent = yield* agents.get(lastUser.agent)
-          if (!agent) {
-            const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
-            const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
-            const error = new NamedError.Unknown({ message: `Agent not found: "${lastUser.agent}".${hint}` })
-            yield* events.publish(Session.Event.Error, { sessionID, error: error.toObject() })
-            throw error
-          }
           const maxSteps = agent.steps ?? Infinity
           const isLastStep = step >= maxSteps
           msgs = yield* SessionReminders.apply({ messages: msgs, agent, session }).pipe(
@@ -1256,7 +1269,11 @@ const layer = Layer.effect(
               yield* summary.summarize({ sessionID, messageID: lastUser.id }).pipe(Effect.ignore, Effect.forkIn(scope))
 
             const prefix = snapshot(msgs, [])
-            yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+            yield* plugin.trigger(
+              "experimental.chat.messages.transform",
+              { sessionID, agent },
+              { messages: msgs },
+            )
             const prefixViolations = restoreMessages(msgs, prefix)
             if (prefixViolations > 0) {
               yield* Effect.logWarning("[prefix] restored modified history", {
@@ -1265,23 +1282,11 @@ const layer = Layer.effect(
               })
             }
 
-            const [skills, env, instructions, mcpInstructions, modelMsgs] = yield* Effect.all([
-              sys.skills(agent),
-              sys.environment(model),
-              instruction.system().pipe(Effect.orDie),
-              sys.mcp(agent, session.permission),
-              MessageV2.toModelMessagesEffect(msgs, model),
-            ])
-            const system = [
-              ...env,
-              ...instructions,
-              ...(mcpInstructions ? [mcpInstructions] : []),
-              ...(skills ? [skills] : []),
-            ]
+            const modelMsgs = yield* MessageV2.toModelMessagesEffect(msgs, model)
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             const contextLimit = usable({ cfg: yield* config.get(), model, outputTokenMax: flags.outputTokenMax })
-            const requestTokens = Token.estimate(JSON.stringify({ system, messages: modelMsgs, tools }))
+            const requestTokens = estimateRequestTokens({ system, messages: modelMsgs, tools })
             if (contextLimit > 0 && requestTokens > contextLimit) {
               yield* Effect.logWarning("[context] request would exceed model limit", {
                 "session.id": sessionID,
