@@ -1423,6 +1423,48 @@ describe("session.compaction.process", () => {
   )
 
   itCompaction.instance(
+    "trims oldest turns when the compaction prompt exceeds the limit",
+    () => {
+      const stub = llm()
+      let captured = ""
+      stub.push(
+        reply("summary", (input) => {
+          captured = JSON.stringify(input.messages)
+        }),
+      )
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "old huge " + "x".repeat(20_000))
+        yield* createUserMessage(session.id, "middle turn")
+        yield* createUserMessage(session.id, "latest turn")
+        yield* createCompactionMarker(session.id)
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({
+          parentID: parent!,
+          messages: msgs,
+          sessionID: session.id,
+          auto: false,
+        })
+
+        expect(captured).not.toContain("old huge")
+        expect(captured).toContain("middle turn")
+        expect(captured).toContain("latest turn")
+      }).pipe(
+        withCompaction({
+          llm: stub.llmLayer,
+          config: cfg({ tail_turns: 0 }),
+          provider: ProviderTest.fake({ model: createModel({ context: 4_000, output: 1_000 }) }),
+        }),
+      )
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
     "anchors repeated compactions with the previous summary",
     () => {
       const stub = llm()

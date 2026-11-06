@@ -375,10 +375,12 @@ const layer = Layer.effect(
         { sessionID: input.sessionID },
         { context: [], prompt: undefined },
       )
-      const msgs = structuredClone(selected.head)
+      const limit = usable({ cfg, model, outputTokenMax: flags.outputTokenMax })
+      let head = selected.head
+      let msgs = structuredClone(head)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
-      const conversation = msgs.map(serialize).filter(Boolean).join("\n\n")
-      const nextPrompt =
+      let conversation = msgs.map(serialize).filter(Boolean).join("\n\n")
+      const build = () =>
         compacting.prompt ??
         [
           buildPrompt({
@@ -389,6 +391,35 @@ const layer = Layer.effect(
         ]
           .filter(Boolean)
           .join("\n\n")
+      let nextPrompt = build()
+      let dropped = 0
+      while (limit > 0 && Token.estimate(nextPrompt) > limit && head.length > 1) {
+        const all = turns(head)
+        if (all.length <= 1) break
+        head = head.slice(all[1]!.start)
+        msgs = structuredClone(head)
+        yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+        conversation = msgs.map(serialize).filter(Boolean).join("\n\n")
+        nextPrompt = build()
+        dropped++
+      }
+      if (dropped > 0) {
+        yield* Effect.logInfo("compaction trimmed head to fit context", {
+          "session.id": input.sessionID,
+          dropped,
+          tokens: Token.estimate(nextPrompt),
+          limit,
+        })
+      }
+      if (limit > 0 && Token.estimate(nextPrompt) > limit) {
+        yield* events.publish(Session.Event.Error, {
+          sessionID: input.sessionID,
+          error: new SessionV1.ContextOverflowError({
+            message: "Compaction request exceeds the model context limit after trimming history",
+          }).toObject(),
+        })
+        return "stop"
+      }
       const ctx = yield* InstanceState.context
       const msg: SessionV1.Assistant = {
         id: MessageID.ascending(),

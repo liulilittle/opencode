@@ -54,6 +54,9 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { eq } from "drizzle-orm"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionReminders } from "./reminders"
+import { restoreMessages, snapshot } from "./prefix"
+import { Token } from "@/util/token"
+import { usable } from "./overflow"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
 
@@ -1252,7 +1255,15 @@ const layer = Layer.effect(
             if (step === 1)
               yield* summary.summarize({ sessionID, messageID: lastUser.id }).pipe(Effect.ignore, Effect.forkIn(scope))
 
+            const prefix = snapshot(msgs, [])
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+            const prefixViolations = restoreMessages(msgs, prefix)
+            if (prefixViolations > 0) {
+              yield* Effect.logWarning("[prefix] restored modified history", {
+                "session.id": sessionID,
+                count: prefixViolations,
+              })
+            }
 
             const [skills, env, instructions, mcpInstructions, modelMsgs] = yield* Effect.all([
               sys.skills(agent),
@@ -1269,6 +1280,30 @@ const layer = Layer.effect(
             ]
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
+            const contextLimit = usable({ cfg: yield* config.get(), model, outputTokenMax: flags.outputTokenMax })
+            const requestTokens = Token.estimate(JSON.stringify({ system, messages: modelMsgs, tools }))
+            if (contextLimit > 0 && requestTokens > contextLimit) {
+              yield* Effect.logWarning("[context] request would exceed model limit", {
+                "session.id": sessionID,
+                tokens: requestTokens,
+                limit: contextLimit,
+              })
+              if (lastFinished?.summary !== true) {
+                yield* compaction.create({
+                  sessionID,
+                  agent: lastUser.agent,
+                  model: lastUser.model,
+                  auto: true,
+                })
+                return "continue" as const
+              }
+              handle.message.error = new SessionV1.ContextOverflowError({
+                message: "Request exceeds the model context limit after compaction",
+              }).toObject()
+              handle.message.finish = "error"
+              yield* sessions.updateMessage(handle.message)
+              return "break" as const
+            }
             const result = yield* handle.process({
               user: lastUser,
               agent,
@@ -1335,7 +1370,6 @@ const layer = Layer.effect(
           continue
         }
 
-        yield* compaction.prune({ sessionID }).pipe(Effect.ignore, Effect.forkIn(scope))
         return yield* lastAssistant(sessionID)
       },
     )

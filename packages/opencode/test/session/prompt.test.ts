@@ -674,6 +674,43 @@ it.instance("loop surfaces content-filter finishes as session errors", () =>
   }),
 )
 
+it.instance("preflights the model limit and compacts before an oversized request", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig((url) => {
+      const base = providerCfg(url)
+      const model = base.provider.test.models["test-model"]
+      return {
+        ...base,
+        provider: {
+          ...base.provider,
+          test: {
+            ...base.provider.test,
+            models: {
+              ...base.provider.test.models,
+              "test-model": { ...model, limit: { context: 30_000, output: 4_000 } },
+            },
+          },
+        },
+      }
+    })
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Preflight" })
+    yield* llm.push(reply().text("summary").stop())
+
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "x".repeat(400_000) }],
+    })
+    yield* prompt.loop({ sessionID: chat.id })
+
+    const messages = yield* sessions.messages({ sessionID: chat.id })
+    expect(messages.some((message) => message.parts.some((part) => part.type === "compaction"))).toBe(true)
+  }),
+)
+
 it.instance("loop stops provider overflow instead of auto-compacting when disabled", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig((url) => ({
