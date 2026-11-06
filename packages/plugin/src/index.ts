@@ -350,6 +350,15 @@ export interface Hooks {
     output: { context: string[]; prompt?: string },
   ) => Promise<void>
   /**
+   * Called before compaction selects the retained tail. `hard` message IDs are
+   * never summarized; `soft` IDs are preferred when the retention budget allows.
+   * Hosts without this hook ignore it, so plugins must treat it as optional.
+   */
+  "experimental.session.pin"?: (
+    input: { sessionID: string; agent?: AgentInfo },
+    output: { hard?: string[]; soft?: string[] },
+  ) => Promise<void>
+  /**
    * Called after compaction succeeds and before a synthetic user
    * auto-continue message is added.
    *

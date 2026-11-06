@@ -35,6 +35,8 @@ type Turn = {
   start: number
   end: number
   id: MessageID
+  hard: boolean
+  soft: boolean
 }
 
 type Tail = {
@@ -119,16 +121,23 @@ function preserveRecentBudget(input: { cfg: ConfigV1.Info; model: Provider.Model
   )
 }
 
-function turns(messages: SessionV1.WithParts[]) {
+function turns(
+  messages: SessionV1.WithParts[],
+  pins?: { hard?: ReadonlySet<string>; soft?: ReadonlySet<string> },
+) {
   const result: Turn[] = []
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i]
     if (msg.info.role !== "user") continue
     if (msg.parts.some((part) => part.type === "compaction")) continue
+    const partHard = msg.parts.some((part) => part.type === "text" && part.metadata?.pin === "hard")
+    const partSoft = msg.parts.some((part) => part.type === "text" && part.metadata?.pin === "soft")
     result.push({
       start: i,
       end: messages.length,
       id: msg.info.id,
+      hard: pins?.hard?.has(msg.info.id) === true || partHard,
+      soft: pins?.soft?.has(msg.info.id) === true || partSoft,
     })
   }
   for (let i = 0; i < result.length - 1; i++) {
@@ -225,11 +234,12 @@ const layer = Layer.effect(
       messages: SessionV1.WithParts[]
       cfg: ConfigV1.Info
       model: Provider.Model
+      pins?: { hard?: ReadonlySet<string>; soft?: ReadonlySet<string> }
     }) {
       const limit = input.cfg.compaction?.tail_turns
       if (limit !== undefined && limit <= 0) return { head: input.messages, tail_start_id: undefined }
       const budget = preserveRecentBudget({ cfg: input.cfg, model: input.model })
-      const all = turns(input.messages)
+      const all = turns(input.messages, input.pins)
       if (!all.length) return { head: input.messages, tail_start_id: undefined }
       const recent = limit === undefined ? all : all.slice(-limit)
 
@@ -242,8 +252,9 @@ const layer = Layer.effect(
           messages: input.messages.slice(turn.start, turn.end),
           model: input.model,
         })
-        if (total + size <= budget) {
-          total += size
+        const effective = turn.soft ? Math.floor(size / 2) : size
+        if (total + effective <= budget) {
+          total += effective
           keep = { start: turn.start, id: turn.id }
           continue
         }
@@ -262,7 +273,26 @@ const layer = Layer.effect(
         break
       }
 
-      if (!keep || keep.start === 0) return { head: input.messages, tail_start_id: undefined }
+      // Hard pins are never summarized: move the retention boundary back to the
+      // earliest pinned turn. This can exceed the soft budget, but the context
+      // preflight still enforces the model hard limit.
+      const earliestHard = all.find((turn) => turn.hard && (!keep || turn.start < keep.start))
+      if (earliestHard) {
+        if (keep && earliestHard.start < keep.start) {
+          yield* Effect.logInfo("hard pin extends retained tail", {
+            budget,
+            total,
+            start: earliestHard.start,
+          })
+        }
+        keep = { start: earliestHard.start, id: earliestHard.id }
+      }
+
+      if (!keep) return { head: input.messages, tail_start_id: undefined }
+      if (keep.start === 0) {
+        if (all.some((turn) => turn.hard)) return { head: [], tail_start_id: keep.id }
+        return { head: input.messages, tail_start_id: undefined }
+      }
       return {
         head: input.messages.slice(0, keep.start),
         tail_start_id: keep.id,
@@ -368,11 +398,26 @@ const layer = Layer.effect(
       const prior = completedCompactions(history)
       const hidden = new Set(prior.flatMap((item) => [item.userIndex, item.assistantIndex]))
       const previousSummary = prior.at(-1)?.summary
+      const pins = yield* plugin.trigger(
+        "experimental.session.pin",
+        { sessionID: input.sessionID, agent },
+        { hard: [] as string[], soft: [] as string[] },
+      )
       const selected = yield* select({
         messages: history.filter((_, index) => !hidden.has(index)),
         cfg,
         model,
+        pins: { hard: new Set(pins.hard ?? []), soft: new Set(pins.soft ?? []) },
       })
+      if (selected.head.length === 0 && selected.tail_start_id) {
+        yield* events.publish(Session.Event.Error, {
+          sessionID: input.sessionID,
+          error: new SessionV1.ContextOverflowError({
+            message: "Compaction cannot proceed: all remaining context is hard-pinned",
+          }).toObject(),
+        })
+        return "stop"
+      }
       // Allow plugins to inject context or replace compaction prompt.
       const compacting = yield* plugin.trigger(
         "experimental.session.compacting",
@@ -399,8 +444,9 @@ const layer = Layer.effect(
       let nextPrompt = build()
       let dropped = 0
       while (limit > 0 && Token.estimate(nextPrompt) > limit && head.length > 1) {
-        const all = turns(head)
+        const all = turns(head, { hard: new Set(pins.hard ?? []), soft: new Set(pins.soft ?? []) })
         if (all.length <= 1) break
+        if (all[0]?.hard) break
         head = head.slice(all[1]!.start)
         msgs = structuredClone(head)
         yield* plugin.trigger("experimental.chat.messages.transform", { sessionID: input.sessionID, agent }, { messages: msgs })
