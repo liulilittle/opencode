@@ -1208,6 +1208,57 @@ describe("session.compaction.process", () => {
   )
 
   itCompaction.instance(
+    "publishes compaction result metadata to plugins",
+    () => {
+      let seen:
+        | {
+            auto?: boolean
+            result?: string
+            summaryMessageID?: string
+            tailStartID?: string
+            dropped?: number
+          }
+        | undefined
+      const plugin = Layer.mock(Plugin.Service)({
+        trigger: <Name extends string, Input, Output>(name: Name, input: Input, output: Output) => {
+          if (name === "experimental.session.compacted") seen = input as typeof seen
+          return Effect.succeed(output)
+        },
+        list: () => Effect.succeed([]),
+        init: () => Effect.void,
+      })
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "first")
+        yield* createUserMessage(session.id, "second")
+        yield* createUserMessage(session.id, "third")
+        yield* createCompactionMarker(session.id)
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({
+          parentID: parent!,
+          messages: msgs,
+          sessionID: session.id,
+          auto: false,
+        })
+        expect(seen?.auto).toBe(false)
+        expect(seen?.result).toBe("continue")
+        expect(seen?.summaryMessageID).toBeTruthy()
+        expect(seen?.tailStartID).toBeTruthy()
+        expect(seen?.dropped).toBe(0)
+      }).pipe(
+        withCompaction({
+          plugin,
+          config: cfg({ tail_turns: 1, preserve_recent_tokens: 10_000 }),
+        }),
+      )
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
     "allows plugins to disable synthetic continue prompt",
     Effect.gen(function* () {
       const ssn = yield* SessionNs.Service

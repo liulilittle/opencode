@@ -547,6 +547,21 @@ const layer = Layer.effect(
         })
       }
 
+      yield* plugin.trigger(
+        "experimental.session.compacted",
+        {
+          sessionID: input.sessionID,
+          auto: input.auto,
+          result,
+          summaryMessageID: processor.message.id,
+          tokens: processor.message.tokens,
+          cost: processor.message.cost,
+          tailStartID: selected.tail_start_id,
+          dropped,
+        },
+        {},
+      )
+
       if (result === "continue" && input.auto) {
         if (replay) {
           const original = replay.info

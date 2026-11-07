@@ -40,6 +40,13 @@ export type AgentInfo = {
   steps?: number
 }
 
+export type UsageInfo = {
+  input: number
+  output: number
+  reasoning: number
+  cache: { read: number; write: number }
+}
+
 export type WorkspaceInfo = {
   id: string
   type: string
@@ -357,6 +364,37 @@ export interface Hooks {
   "experimental.session.pin"?: (
     input: { sessionID: string; agent?: AgentInfo },
     output: { hard?: string[]; soft?: string[] },
+  ) => Promise<void>
+  /**
+   * Called after an assistant step is persisted with its exact usage. Plugins
+   * can account tokens/cost without parsing message parts.
+   */
+  "experimental.chat.usage"?: (
+    input: {
+      sessionID: string
+      messageID: string
+      agent: string
+      model: { providerID: string; modelID: string }
+      tokens: UsageInfo
+      cost: number
+    },
+    output: {},
+  ) => Promise<void>
+  /**
+   * Called after compaction finishes and before auto-continue injection.
+   */
+  "experimental.session.compacted"?: (
+    input: {
+      sessionID: string
+      auto: boolean
+      result: "continue" | "stop"
+      summaryMessageID: string
+      tokens: UsageInfo
+      cost: number
+      tailStartID?: string
+      dropped: number
+    },
+    output: {},
   ) => Promise<void>
   /**
    * Called after compaction succeeds and before a synthetic user

@@ -1325,6 +1325,19 @@ const layer = Layer.effect(
               toolChoice: format.type === "json_schema" ? "required" : undefined,
             })
 
+            yield* plugin.trigger(
+              "experimental.chat.usage",
+              {
+                sessionID,
+                messageID: handle.message.id,
+                agent: agent.name,
+                model: { providerID: handle.message.providerID, modelID: handle.message.modelID },
+                tokens: handle.message.tokens,
+                cost: handle.message.cost,
+              },
+              {},
+            )
+
             if (structured !== undefined) {
               handle.message.structured = structured
               handle.message.finish = handle.message.finish ?? "stop"

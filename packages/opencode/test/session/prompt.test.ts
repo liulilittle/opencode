@@ -253,6 +253,30 @@ const withMcpInstructions = testEffect(
     ],
   }),
 )
+
+const usageSeen: {
+  value?: { sessionID?: string; messageID?: string; tokens?: unknown; cost?: number }
+} = {}
+const usagePlugin = Layer.mock(Plugin.Service)({
+  trigger: <Name extends string, Input, Output>(name: Name, input: Input, output: Output) => {
+    if (name === "experimental.chat.usage") usageSeen.value = input as typeof usageSeen.value
+    return Effect.succeed(output)
+  },
+  list: () => Effect.succeed([]),
+  init: () => Effect.void,
+})
+const usagePrompt = testEffect(
+  LayerNode.compile(
+    LayerNode.group([promptRoot, testLLMServerNode]),
+    [
+      [SessionSummary.node, summary],
+      [LSP.node, lsp],
+      [MCP.node, makeMcp()],
+      [RuntimeFlags.node, runtimeFlags],
+      [Plugin.node, usagePlugin],
+    ] as const,
+  ),
+)
 const unix = process.platform !== "win32" ? it.instance : it.instance.skip
 const unixNoLLMServer = process.platform !== "win32" ? noLLMServer.instance : noLLMServer.instance.skip
 
@@ -2502,6 +2526,29 @@ noLLMServer.instance(
           expect(err.data.message).toContain("init")
         }
       }
+    }),
+  30_000,
+)
+
+usagePrompt.instance(
+  "emits exact assistant usage to plugins",
+  () =>
+    Effect.gen(function* () {
+      usageSeen.value = undefined
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Usage" })
+      yield* llm.push(reply().text("hello").stop())
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        parts: [{ type: "text", text: "hi" }],
+      })
+      expect((usageSeen.value as { sessionID?: string } | undefined)?.sessionID).toBe(chat.id)
+      expect((usageSeen.value as { messageID?: string } | undefined)?.messageID).toBeTruthy()
+      expect((usageSeen.value as { tokens?: unknown } | undefined)?.tokens).toBeDefined()
+      expect((usageSeen.value as { cost?: number } | undefined)?.cost).toBeGreaterThanOrEqual(0)
     }),
   30_000,
 )
