@@ -397,6 +397,35 @@ export interface Hooks {
     output: {},
   ) => Promise<void>
   /**
+   * Called when the host injects a native background task result into its
+   * parent session. Plugins can use this to suppress their own duplicate
+   * delivery; stock opencode never calls it.
+   */
+  "experimental.chat.platform_return"?: (
+    input: {
+      sessionID: string
+      parentSessionID: string
+      taskID: string
+      taskState: "completed" | "error"
+      description: string
+      text: string
+    },
+    output: {},
+  ) => Promise<void>
+  /**
+   * Reports native background subagent lifecycle transitions so plugins do
+   * not have to poll child sessions. Stock opencode never calls it.
+   */
+  "experimental.subagent.status"?: (
+    input: {
+      parentSessionID: string
+      sessionID: string
+      status: "created" | "completed" | "error"
+      taskState?: "completed" | "error"
+    },
+    output: {},
+  ) => Promise<void>
+  /**
    * Called after compaction succeeds and before a synthetic user
    * auto-continue message is added.
    *

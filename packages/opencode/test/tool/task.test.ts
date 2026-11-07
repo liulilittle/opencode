@@ -3,7 +3,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
-import { Cause, Deferred, Effect, Exit, Fiber } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { Agent } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -24,6 +24,7 @@ import { disposeAllInstances } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
+import { Plugin } from "../../src/plugin"
 
 afterEach(async () => {
   await disposeAllInstances()
@@ -51,12 +52,50 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
       Database.node,
       RuntimeFlags.node,
       Ripgrep.node,
+      Plugin.node,
     ]),
     [[RuntimeFlags.node, RuntimeFlags.layer(flags)]],
   )
 
 const it = testEffect(layer())
 const background = testEffect(layer({ experimentalBackgroundSubagents: true }))
+
+const platformReturnSeen: { value?: Record<string, unknown> } = {}
+const subagentStatusSeen: Array<Record<string, unknown>> = []
+const platformReturnPlugin = Layer.mock(Plugin.Service)({
+  trigger: <Name extends string, Input, Output>(name: Name, input: Input, output: Output) => {
+    if (name === "experimental.chat.platform_return") platformReturnSeen.value = input as Record<string, unknown>
+    if (name === "experimental.subagent.status") subagentStatusSeen.push(input as Record<string, unknown>)
+    return Effect.succeed(output)
+  },
+  list: () => Effect.succeed([]),
+  init: () => Effect.void,
+})
+const platformReturn = testEffect(
+  LayerNode.compile(
+    LayerNode.group([
+      Agent.node,
+      BackgroundJob.node,
+      EventV2Bridge.node,
+      Config.node,
+      CrossSpawnSpawner.node,
+      Session.node,
+      SessionProjector.node,
+      SessionRunState.node,
+      SessionStatus.node,
+      Truncate.node,
+      ToolRegistry.node,
+      Database.node,
+      RuntimeFlags.node,
+      Ripgrep.node,
+      Plugin.node,
+    ]),
+    [
+      [RuntimeFlags.node, RuntimeFlags.layer({ experimentalBackgroundSubagents: true })],
+      [Plugin.node, platformReturnPlugin],
+    ],
+  ),
+)
 
 function defer<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
@@ -963,6 +1002,65 @@ describe("tool.task", () => {
         })
         expect(notification.parts[0].text).toContain("second done")
       }
+    }),
+  )
+
+  platformReturn.instance("emits platform_return before injecting a background result", () =>
+    Effect.gen(function* () {
+      platformReturnSeen.value = undefined
+      subagentStatusSeen.length = 0
+      const jobs = yield* BackgroundJob.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const injected = yield* Deferred.make<SessionPrompt.PromptInput>()
+      const result = yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "look into the cache key path",
+          subagent_type: "general",
+          background: true,
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: {
+            promptOps: {
+              ...stubOps({ text: "background done" }),
+              prompt: (input) =>
+                input.sessionID === chat.id
+                  ? Deferred.succeed(injected, input).pipe(Effect.as(reply(input, "ack")))
+                  : Effect.succeed(reply(input, "background done")),
+            } satisfies TaskPromptOps,
+          },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      const waited = yield* jobs.wait({ id: result.metadata.sessionId, timeout: 1_000 })
+      expect(waited.info?.status).toBe("completed")
+      yield* Deferred.await(injected)
+      expect(platformReturnSeen.value).toMatchObject({
+        sessionID: chat.id,
+        parentSessionID: chat.id,
+        taskID: result.metadata.sessionId,
+        taskState: "completed",
+        description: "inspect bug",
+        text: "background done",
+      })
+      expect(subagentStatusSeen).toMatchObject([
+        { parentSessionID: chat.id, sessionID: result.metadata.sessionId, status: "created" },
+        {
+          parentSessionID: chat.id,
+          sessionID: result.metadata.sessionId,
+          status: "completed",
+          taskState: "completed",
+        },
+      ])
     }),
   )
 
