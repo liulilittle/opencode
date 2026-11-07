@@ -2414,6 +2414,7 @@ describe("session.llm.context estimate", () => {
           messageID: "msg_user-context-estimate",
           agent: "test",
           model: { providerID: "vivgrid", modelID: resolved.id },
+          small: false,
         })
         expect(seen?.estimatedTokens).toBeGreaterThan(0)
         expect(seen?.contextLimit).toBeGreaterThan(0)

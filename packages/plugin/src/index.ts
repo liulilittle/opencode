@@ -396,6 +396,7 @@ export interface Hooks {
       messageID: string
       agent: string
       model: { providerID: string; modelID: string }
+      small?: boolean
       estimatedTokens: number
       contextLimit: number
       remainingTokens: number

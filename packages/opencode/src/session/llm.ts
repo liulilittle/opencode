@@ -138,6 +138,7 @@ const live: Layer.Layer<
           messageID: input.user.id,
           agent: input.agent.name,
           model: { providerID: input.model.providerID, modelID: input.model.id },
+          small: input.small ?? false,
           estimatedTokens: requestTokens,
           contextLimit,
           remainingTokens: contextLimit > 0 ? Math.max(0, contextLimit - requestTokens) : 0,
