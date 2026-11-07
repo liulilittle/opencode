@@ -410,12 +410,16 @@ const layer = Layer.effect(
         pins: { hard: new Set(pins.hard ?? []), soft: new Set(pins.soft ?? []) },
       })
       if (selected.head.length === 0 && selected.tail_start_id) {
+        const message = "Compaction cannot proceed: all remaining context is hard-pinned"
         yield* events.publish(Session.Event.Error, {
           sessionID: input.sessionID,
-          error: new SessionV1.ContextOverflowError({
-            message: "Compaction cannot proceed: all remaining context is hard-pinned",
-          }).toObject(),
+          error: new SessionV1.ContextOverflowError({ message }).toObject(),
         })
+        yield* plugin.trigger(
+          "experimental.session.compaction.failed",
+          { sessionID: input.sessionID, auto: input.auto, reason: "hard-pinned", message },
+          {},
+        )
         return "stop"
       }
       // Allow plugins to inject context or replace compaction prompt.
@@ -463,12 +467,16 @@ const layer = Layer.effect(
         })
       }
       if (limit > 0 && Token.estimate(nextPrompt) > limit) {
+        const message = "Compaction request exceeds the model context limit after trimming history"
         yield* events.publish(Session.Event.Error, {
           sessionID: input.sessionID,
-          error: new SessionV1.ContextOverflowError({
-            message: "Compaction request exceeds the model context limit after trimming history",
-          }).toObject(),
+          error: new SessionV1.ContextOverflowError({ message }).toObject(),
         })
+        yield* plugin.trigger(
+          "experimental.session.compaction.failed",
+          { sessionID: input.sessionID, auto: input.auto, reason: "trim-limit", message },
+          {},
+        )
         return "stop"
       }
       const ctx = yield* InstanceState.context
@@ -530,13 +538,17 @@ const layer = Layer.effect(
       })
 
       if (result === "compact") {
-        processor.message.error = new SessionV1.ContextOverflowError({
-          message: replay
-            ? "Conversation history too large to compact - exceeds model context limit"
-            : "Session too large to compact - context exceeds model limit even after stripping media",
-        }).toObject()
+        const message = replay
+          ? "Conversation history too large to compact - exceeds model context limit"
+          : "Session too large to compact - context exceeds model limit even after stripping media"
+        processor.message.error = new SessionV1.ContextOverflowError({ message }).toObject()
         processor.message.finish = "error"
         yield* session.updateMessage(processor.message)
+        yield* plugin.trigger(
+          "experimental.session.compaction.failed",
+          { sessionID: input.sessionID, auto: input.auto, reason: "compact-result", message },
+          {},
+        )
         return "stop"
       }
 
@@ -648,7 +660,19 @@ const layer = Layer.effect(
         }
       }
 
-      if (processor.message.error) return "stop"
+      if (processor.message.error) {
+        yield* plugin.trigger(
+          "experimental.session.compaction.failed",
+          {
+            sessionID: input.sessionID,
+            auto: input.auto,
+            reason: "agent-error",
+            message: processor.message.error.name,
+          },
+          {},
+        )
+        return "stop"
+      }
       if (result === "continue") {
         yield* events.publish(Event.Compacted, { sessionID: input.sessionID })
       }

@@ -904,6 +904,39 @@ describe("session.compaction.process", () => {
     }).pipe(withCompaction({ result: "compact" })),
   )
 
+  itCompaction.instance(
+    "emits compaction.failed when the compaction result is compact",
+    () => {
+      let seen: Record<string, unknown> | undefined
+      const plugin = Layer.mock(Plugin.Service)({
+        trigger: <Name extends string, Input, Output>(name: Name, input: Input, output: Output) => {
+          if (name === "experimental.session.compaction.failed") seen = input as Record<string, unknown>
+          return Effect.succeed(output)
+        },
+        list: () => Effect.succeed([]),
+        init: () => Effect.void,
+      })
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        const msg = yield* createUserMessage(session.id, "hello")
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const result = yield* SessionCompaction.use.process({
+          parentID: msg.id,
+          messages: msgs,
+          sessionID: session.id,
+          auto: false,
+        })
+        expect(result).toBe("stop")
+        expect(seen).toMatchObject({
+          sessionID: session.id,
+          auto: false,
+          reason: "compact-result",
+        })
+      }).pipe(withCompaction({ result: "compact", plugin }))
+    },
+  )
+
   it.instance(
     "adds synthetic continue prompt when auto is enabled",
     Effect.gen(function* () {

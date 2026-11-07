@@ -257,9 +257,14 @@ const withMcpInstructions = testEffect(
 const usageSeen: {
   value?: { sessionID?: string; messageID?: string; tokens?: unknown; cost?: number }
 } = {}
+const runSeen: string[] = []
+const abortSeen: Array<{ sessionID?: string; source?: string; reason?: string }> = []
 const usagePlugin = Layer.mock(Plugin.Service)({
   trigger: <Name extends string, Input, Output>(name: Name, input: Input, output: Output) => {
     if (name === "experimental.chat.usage") usageSeen.value = input as typeof usageSeen.value
+    if (name === "experimental.session.run") runSeen.push((input as { state?: string }).state ?? "")
+    if (name === "experimental.session.abort")
+      abortSeen.push(input as { sessionID?: string; source?: string; reason?: string })
     return Effect.succeed(output)
   },
   list: () => Effect.succeed([]),
@@ -2535,6 +2540,7 @@ usagePrompt.instance(
   () =>
     Effect.gen(function* () {
       usageSeen.value = undefined
+      runSeen.length = 0
       const { llm } = yield* useServerConfig(providerCfg)
       const prompt = yield* SessionPrompt.Service
       const sessions = yield* Session.Service
@@ -2549,6 +2555,26 @@ usagePrompt.instance(
       expect((usageSeen.value as { messageID?: string } | undefined)?.messageID).toBeTruthy()
       expect((usageSeen.value as { tokens?: unknown } | undefined)?.tokens).toBeDefined()
       expect((usageSeen.value as { cost?: number } | undefined)?.cost).toBeGreaterThanOrEqual(0)
+      expect((usageSeen.value as { source?: string } | undefined)?.source).toBe("chat")
+      expect((usageSeen.value as { step?: number } | undefined)?.step).toBeGreaterThanOrEqual(1)
+      expect((usageSeen.value as { contextTokens?: number } | undefined)?.contextTokens).toBeGreaterThanOrEqual(0)
+      expect((usageSeen.value as { totalTokens?: number } | undefined)?.totalTokens).toBeGreaterThanOrEqual(0)
+      expect((usageSeen.value as { totalCost?: number } | undefined)?.totalCost).toBeGreaterThanOrEqual(0)
+      expect(runSeen).toEqual(["started", "settled"])
+    }),
+  30_000,
+)
+
+usagePrompt.instance(
+  "emits the abort source to plugins",
+  () =>
+    Effect.gen(function* () {
+      abortSeen.length = 0
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Abort" })
+      yield* prompt.cancel(chat.id, "user")
+      expect(abortSeen).toContainEqual({ sessionID: chat.id, source: "user", reason: "session.abort" })
     }),
   30_000,
 )

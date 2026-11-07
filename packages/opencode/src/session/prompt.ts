@@ -102,7 +102,10 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
 }
 
 export interface Interface {
-  readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
+  readonly cancel: (
+    sessionID: SessionID,
+    source?: "user" | "task" | "plugin" | "system" | "unknown",
+  ) => Effect.Effect<void>
   readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
   readonly loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts>
   readonly shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError>
@@ -145,14 +148,22 @@ const layer = Layer.effect(
     const { db } = database
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
       return {
-        cancel: (sessionID: SessionID) => cancel(sessionID),
+        cancel: (sessionID: SessionID) => cancel(sessionID, "task"),
         resolvePromptParts: (template: string) => resolvePromptParts(template),
         prompt: (input: PromptInput) => prompt(input).pipe(Effect.catch(Effect.die)),
       } satisfies TaskPromptOps
     })
 
-    const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
+    const cancel = Effect.fn("SessionPrompt.cancel")(function* (
+      sessionID: SessionID,
+      source: "user" | "task" | "plugin" | "system" | "unknown" = "unknown",
+    ) {
       yield* Effect.logInfo("cancel", { "session.id": sessionID })
+      yield* plugin.trigger(
+        "experimental.session.abort",
+        { sessionID, source, reason: "session.abort" },
+        {},
+      )
       yield* state.cancel(sessionID)
     })
 
@@ -1090,6 +1101,9 @@ const layer = Layer.effect(
 
         while (true) {
           yield* status.set(sessionID, { type: "busy" })
+          if (step === 0) {
+            yield* plugin.trigger("experimental.session.run", { sessionID, state: "started" }, {})
+          }
           yield* Effect.logInfo("loop", { "session.id": sessionID, step })
 
           let msgs = yield* MessageV2.filterCompactedEffect(sessionID).pipe(
@@ -1325,6 +1339,14 @@ const layer = Layer.effect(
               toolChoice: format.type === "json_schema" ? "required" : undefined,
             })
 
+            const usageSession = yield* sessions.get(sessionID).pipe(Effect.orDie)
+            const usageTotal = usageSession.tokens
+              ? usageSession.tokens.input +
+                usageSession.tokens.output +
+                usageSession.tokens.reasoning +
+                usageSession.tokens.cache.read +
+                usageSession.tokens.cache.write
+              : undefined
             yield* plugin.trigger(
               "experimental.chat.usage",
               {
@@ -1334,6 +1356,17 @@ const layer = Layer.effect(
                 model: { providerID: handle.message.providerID, modelID: handle.message.modelID },
                 tokens: handle.message.tokens,
                 cost: handle.message.cost,
+                contextTokens:
+                  handle.message.tokens.total ??
+                  handle.message.tokens.input +
+                    handle.message.tokens.output +
+                    handle.message.tokens.reasoning +
+                    handle.message.tokens.cache.read +
+                    handle.message.tokens.cache.write,
+                totalTokens: usageTotal,
+                totalCost: usageSession.cost,
+                source: "chat",
+                step,
               },
               {},
             )
@@ -1395,7 +1428,24 @@ const layer = Layer.effect(
     const loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.loop")(function* (
       input: LoopInput,
     ) {
-      return yield* state.ensureRunning(input.sessionID, lastAssistant(input.sessionID), runLoop(input.sessionID))
+      const run = runLoop(input.sessionID).pipe(
+        Effect.onExit((exit) =>
+          plugin.trigger(
+            "experimental.session.run",
+            {
+              sessionID: input.sessionID,
+              state: "settled",
+              reason: Exit.isSuccess(exit)
+                ? "completed"
+                : Cause.hasInterruptsOnly(exit.cause)
+                  ? "interrupted"
+                  : "error",
+            },
+            {},
+          ),
+        ),
+      )
+      return yield* state.ensureRunning(input.sessionID, lastAssistant(input.sessionID), run)
     })
 
     const shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError> = Effect.fn(

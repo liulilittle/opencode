@@ -2345,6 +2345,99 @@ const thinkingPlugin = Layer.mock(Plugin.Service)({
   init: () => Effect.void,
 })
 
+const contextSeen: {
+  value?: {
+    estimatedTokens?: number
+    contextLimit?: number
+    remainingTokens?: number
+    [key: string]: unknown
+  }
+} = {}
+const contextPlugin = Layer.mock(Plugin.Service)({
+  trigger: <Name extends string, Input, Output>(name: Name, input: Input, output: Output) => {
+    if (name === "experimental.chat.context") contextSeen.value = input as Record<string, unknown>
+    return Effect.succeed(output)
+  },
+  list: () => Effect.succeed([]),
+  init: () => Effect.void,
+})
+
+describe("session.llm.context estimate", () => {
+  it.instance(
+    "reports the host token estimate to plugins",
+    () =>
+      Effect.gen(function* () {
+        contextSeen.value = undefined
+        const fixture = loadFixture("vivgrid", "gemini-3.1-pro-preview")
+        const request = waitRequest(
+          "/chat/completions",
+          new Response(createChatStream("Hello"), {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          }),
+        )
+        const resolved = yield* Provider.use.getModel(
+          ProviderV2.ID.make("vivgrid"),
+          ModelV2.ID.make(fixture.model.id),
+        )
+        const sessionID = SessionID.make("session-context-estimate")
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+
+        yield* drainWith(llmLayerWithExecutor({ plugin: contextPlugin }), {
+          user: {
+            id: MessageID.make("msg_user-context-estimate"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: agent.name,
+            model: { providerID: ProviderV2.ID.make("vivgrid"), modelID: resolved.id },
+          } satisfies SessionV1.User,
+          sessionID,
+          model: resolved,
+          agent,
+          system: ["You are a helpful assistant."],
+          messages: [{ role: "user", content: "Hello" }],
+          tools: {},
+        })
+
+        yield* Effect.promise(() => request)
+        const seen = contextSeen.value as
+          | { estimatedTokens?: number; contextLimit?: number; remainingTokens?: number }
+          | undefined
+        expect(seen).toMatchObject({
+          sessionID,
+          messageID: "msg_user-context-estimate",
+          agent: "test",
+          model: { providerID: "vivgrid", modelID: resolved.id },
+        })
+        expect(seen?.estimatedTokens).toBeGreaterThan(0)
+        expect(seen?.contextLimit).toBeGreaterThan(0)
+        expect(seen?.remainingTokens).toBeGreaterThanOrEqual(0)
+      }),
+    {
+      config: () => {
+        const fixture = loadFixture("vivgrid", "gemini-3.1-pro-preview")
+        return {
+          enabled_providers: ["vivgrid"],
+          provider: {
+            vivgrid: {
+              name: "OpenCode Test",
+              npm: "@ai-sdk/openai-compatible",
+              models: { [fixture.model.id]: configModel(fixture.model) as ConfigModel },
+              options: { apiKey: "test-key", baseURL: `${state.server!.url.origin}/v1` },
+            },
+          },
+        }
+      },
+    },
+  )
+})
+
 describe("session.llm.thinking transform", () => {
   it.instance(
     "appends the plugin thinking tail as the last user message",

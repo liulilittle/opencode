@@ -581,7 +581,7 @@ const layer = Layer.effect(
                 ),
               )
             } else {
-              yield* prompt.cancel(input.sessionID)
+              yield* prompt.cancel(input.sessionID, "system")
             }
 
             // "claim" this session so any future events coming from

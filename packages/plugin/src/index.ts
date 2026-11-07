@@ -377,6 +377,65 @@ export interface Hooks {
       model: { providerID: string; modelID: string }
       tokens: UsageInfo
       cost: number
+      contextTokens?: number
+      totalTokens?: number
+      totalCost?: number
+      source?: "chat" | "compaction" | "subagent"
+      step?: number
+    },
+    output: {},
+  ) => Promise<void>
+  /**
+   * Called after the request is prepared and before the hard-limit preflight.
+   * Gives plugins the host's own token estimate so they do not have to parse
+   * the message window themselves.
+   */
+  "experimental.chat.context"?: (
+    input: {
+      sessionID: string
+      messageID: string
+      agent: string
+      model: { providerID: string; modelID: string }
+      estimatedTokens: number
+      contextLimit: number
+      remainingTokens: number
+      outputTokenMax?: number
+    },
+    output: {},
+  ) => Promise<void>
+  /**
+   * Called before a session run starts and after it settles. Stock opencode
+   * never calls it.
+   */
+  "experimental.session.run"?: (
+    input: {
+      sessionID: string
+      state: "started" | "settled"
+      reason?: string
+    },
+    output: {},
+  ) => Promise<void>
+  /**
+   * Called when an abort is requested, before the run is cancelled. The source
+   * is host-attributed; stock opencode never calls it.
+   */
+  "experimental.session.abort"?: (
+    input: {
+      sessionID: string
+      source: "user" | "task" | "plugin" | "system" | "unknown"
+      reason?: string
+    },
+    output: {},
+  ) => Promise<void>
+  /**
+   * Called when compaction terminates without producing a usable summary.
+   */
+  "experimental.session.compaction.failed"?: (
+    input: {
+      sessionID: string
+      auto: boolean
+      reason: string
+      message?: string
     },
     output: {},
   ) => Promise<void>
@@ -406,7 +465,7 @@ export interface Hooks {
       sessionID: string
       parentSessionID: string
       taskID: string
-      taskState: "completed" | "error"
+      taskState: "completed" | "error" | "cancelled"
       description: string
       text: string
     },
@@ -420,8 +479,9 @@ export interface Hooks {
     input: {
       parentSessionID: string
       sessionID: string
-      status: "created" | "completed" | "error"
-      taskState?: "completed" | "error"
+      status: "created" | "completed" | "error" | "cancelled"
+      taskState?: "completed" | "error" | "cancelled"
+      background?: boolean
     },
     output: {},
   ) => Promise<void>

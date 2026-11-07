@@ -73,11 +73,11 @@ export const Parameters = Schema.Struct({
 
 function renderOutput(input: {
   sessionID: SessionID
-  state: "running" | "completed" | "error"
+  state: "running" | "completed" | "error" | "cancelled"
   summary?: string
   text: string
 }) {
-  const tag = input.state === "error" ? "task_error" : "task_result"
+  const tag = input.state === "error" || input.state === "cancelled" ? "task_error" : "task_result"
   return [
     `<task id="${input.sessionID}" state="${input.state}">`,
     ...(input.summary ? [`<summary>${input.summary}</summary>`] : []),
@@ -182,10 +182,15 @@ export const TaskTool = Tool.define(
           ],
         }))
 
-      if (!session && runInBackground) {
+      if (!session) {
         yield* plugin.trigger(
           "experimental.subagent.status",
-          { parentSessionID: ctx.sessionID, sessionID: nextSession.id, status: "created" },
+          {
+            parentSessionID: ctx.sessionID,
+            sessionID: nextSession.id,
+            status: "created",
+            background: runInBackground,
+          },
           {},
         )
       }
@@ -246,17 +251,19 @@ export const TaskTool = Tool.define(
       })
 
       const inject = Effect.fn("TaskTool.injectBackgroundResult")(function* (
-        state: "completed" | "error",
+        state: "completed" | "error" | "cancelled",
         text: string,
       ) {
         const currentParent = yield* sessions.get(ctx.sessionID)
+        const taskState = state === "completed" ? "completed" : state
         yield* plugin.trigger(
           "experimental.subagent.status",
           {
             parentSessionID: ctx.sessionID,
             sessionID: nextSession.id,
             status: state,
-            taskState: state,
+            taskState,
+            background: true,
           },
           {},
         )
@@ -266,7 +273,7 @@ export const TaskTool = Tool.define(
             sessionID: ctx.sessionID,
             parentSessionID: ctx.sessionID,
             taskID: nextSession.id,
-            taskState: state,
+            taskState,
             description: params.description,
             text,
           },
@@ -306,6 +313,7 @@ export const TaskTool = Tool.define(
           Effect.flatMap((result) => {
             if (result.info?.status === "completed") return inject("completed", result.info.output ?? "")
             if (result.info?.status === "error") return inject("error", result.info.error ?? "")
+            if (result.info?.status === "cancelled") return inject("cancelled", result.info.error ?? "")
             return Effect.void
           }),
           Effect.forkIn(scope, { startImmediately: true }),
@@ -384,8 +392,45 @@ export const TaskTool = Tool.define(
               background.waitForPromotion(nextSession.id),
             )
             if (result?.metadata?.background === true) return backgroundResult()
-            if (result?.status === "error") return yield* Effect.fail(new Error(result.error ?? "Task failed"))
-            if (result?.status === "cancelled") return yield* Effect.fail(new Error("Task cancelled"))
+            if (result?.status === "error") {
+              yield* plugin.trigger(
+                "experimental.subagent.status",
+                {
+                  parentSessionID: ctx.sessionID,
+                  sessionID: nextSession.id,
+                  status: "error",
+                  taskState: "error",
+                  background: false,
+                },
+                {},
+              )
+              return yield* Effect.fail(new Error(result.error ?? "Task failed"))
+            }
+            if (result?.status === "cancelled") {
+              yield* plugin.trigger(
+                "experimental.subagent.status",
+                {
+                  parentSessionID: ctx.sessionID,
+                  sessionID: nextSession.id,
+                  status: "cancelled",
+                  taskState: "cancelled",
+                  background: false,
+                },
+                {},
+              )
+              return yield* Effect.fail(new Error("Task cancelled"))
+            }
+            yield* plugin.trigger(
+              "experimental.subagent.status",
+              {
+                parentSessionID: ctx.sessionID,
+                sessionID: nextSession.id,
+                status: "completed",
+                taskState: "completed",
+                background: false,
+              },
+              {},
+            )
             return {
               title: params.description,
               metadata,

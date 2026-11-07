@@ -1064,6 +1064,49 @@ describe("tool.task", () => {
     }),
   )
 
+  platformReturn.instance("emits subagent status for foreground completion", () =>
+    Effect.gen(function* () {
+      subagentStatusSeen.length = 0
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const result = yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "look into the cache key path",
+          subagent_type: "general",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps: stubOps({ text: "done" }) },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(result.output).toContain('state="completed"')
+      expect(subagentStatusSeen).toMatchObject([
+        {
+          parentSessionID: chat.id,
+          sessionID: result.metadata.sessionId,
+          status: "created",
+          background: false,
+        },
+        {
+          parentSessionID: chat.id,
+          sessionID: result.metadata.sessionId,
+          status: "completed",
+          taskState: "completed",
+          background: false,
+        },
+      ])
+    }),
+  )
+
   background.instance("background tasks complete through the background job service", () =>
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service

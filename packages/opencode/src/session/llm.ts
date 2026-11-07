@@ -131,6 +131,20 @@ const live: Layer.Layer<
         messages: prepared.messages,
         tools: prepared.tools,
       })
+      yield* plugin.trigger(
+        "experimental.chat.context",
+        {
+          sessionID: input.sessionID,
+          messageID: input.user.id,
+          agent: input.agent.name,
+          model: { providerID: input.model.providerID, modelID: input.model.id },
+          estimatedTokens: requestTokens,
+          contextLimit,
+          remainingTokens: contextLimit > 0 ? Math.max(0, contextLimit - requestTokens) : 0,
+          outputTokenMax: flags.outputTokenMax,
+        },
+        {},
+      )
       if (contextLimit > 0 && requestTokens > contextLimit) {
         yield* Effect.logWarning("[context] transformed request would exceed model limit", {
           "session.id": input.sessionID,
