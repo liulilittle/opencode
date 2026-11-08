@@ -1866,12 +1866,73 @@ describe("session.compaction.process", () => {
           messages: msgs,
           sessionID: session.id,
           auto: false,
-          system: ["PARENT_SYSTEM_ENV"],
+          // 父请求的环境块(以固定前缀开头)含父模型身份。
+          system: ["You are powered by the model named test-model. The exact model ID is test/test-model"],
         })
 
         expect(captured).toBeDefined()
         // 父 system 由父模型环境块构成(含模型名),对压缩模型不成立且不同缓存域。
-        expect(captured!.system.includes("PARENT_SYSTEM_ENV")).toBe(false)
+        expect(captured!.system.join("\n")).not.toContain("model named test-model")
+      }).pipe(withCompaction({ llm: stub.llmLayer, provider, config: configLayer }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "replaces only the model-specific environment block when the compaction model differs",
+    () => {
+      const stub = llm()
+      let captured: LLM.StreamInput | undefined
+      stub.push(
+        reply("summary", (input) => {
+          captured = input
+        }),
+      )
+      const parentModel = createModel({ context: 100_000, output: 32_000 })
+      const otherModel = { ...parentModel, id: "other-model" }
+      const provider = ProviderTest.fake({
+        model: parentModel,
+        getModel: Effect.fn("TestProvider.getModel.multi2")((providerID, modelID) =>
+          providerID === parentModel.providerID && modelID === otherModel.id
+            ? Effect.succeed(otherModel)
+            : providerID === parentModel.providerID && modelID === parentModel.id
+              ? Effect.succeed(parentModel)
+              : Effect.die(new Error(`Unknown test model: ${providerID}/${modelID}`)),
+        ) as never,
+      })
+      const configLayer = Layer.succeed(
+        Config.Service,
+        TestConfig.make({
+          get: () =>
+            Effect.succeed({
+              ...(Schema.decodeUnknownSync(ConfigV1.Info)({}) as ConfigV1.Info),
+              agent: { compaction: { model: `${parentModel.providerID}/${otherModel.id}` } },
+            } as ConfigV1.Info),
+        }),
+      )
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "hello")
+        yield* createCompactionMarker(session.id)
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        // 模拟父请求 system:环境块块(含模型名)+ 与模型无关的工作区说明(AGENTS.md)。
+        yield* SessionCompaction.use.process({
+          parentID: parent!,
+          messages: msgs,
+          sessionID: session.id,
+          auto: false,
+          system: ["You are powered by the model named test-model", "PROJECT_INSTRUCTIONS"],
+        })
+
+        expect(captured).toBeDefined()
+        const joined = captured!.system.join("\n")
+        // 模型专属的环境块必须替换/剔除,但工作区说明对压缩模型同样有效,不得一起丢。
+        expect(joined).not.toContain("You are powered by the model named test-model")
+        expect(joined).toContain("PROJECT_INSTRUCTIONS")
       }).pipe(withCompaction({ llm: stub.llmLayer, provider, config: configLayer }))
     },
     { git: true },

@@ -38,6 +38,20 @@ export function sharesCompactionPrefix(
   return parent.providerID === compaction.providerID && parent.modelID === compaction.id
 }
 
+const ENV_BLOCK_PREFIX = "You are powered by the model named "
+
+/**
+ * 把环境块里的模型身份替换为压缩模型的身份;块内其余内容(工作目录/平台/日期)
+ * 与原块一致,保持不变。非环境块原样返回。
+ */
+export function replaceEnvironmentBlock(block: string, model: Pick<Provider.Model, "id" | "providerID" | "api">) {
+  if (!block.startsWith(ENV_BLOCK_PREFIX)) return block
+  const firstLineEnd = block.indexOf("\n")
+  const identity = `${ENV_BLOCK_PREFIX}${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`
+  if (firstLineEnd < 0) return identity
+  return identity + block.slice(firstLineEnd)
+}
+
 export const PRUNE_MINIMUM = 20_000
 export const PRUNE_PROTECT = 40_000
 const TOOL_OUTPUT_MAX_CHARS = 2_000
@@ -430,12 +444,16 @@ const layer = Layer.effect(
         ? yield* provider.getModel(compactionAgent.model.providerID, compactionAgent.model.modelID).pipe(Effect.orDie)
         : yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID).pipe(Effect.orDie)
       /**
-       * 父请求的 system 前缀由父模型的环境块构成(system.ts 会写入模型名与
-       * provider/model id)。压缩换模型时这段文本对压缩请求不成立,且本就不是
-       * 同一缓存域,必须丢弃;同模型时才原样复用(共享前缀)。
+       * 父请求的 system 中含 `SystemPrompt.environment` 生成的模型专属环境块
+       * (system.ts 写入模型名与 provider/model id)。压缩换模型时该块事实错误,
+       * 必须替换为压缩模型自己的环境块;其余块(AGENTS.md 指令、MCP 说明、skills)
+       * 与模型无关,对压缩同样有效,必须保留 —— 整段丢弃会删掉工作区上下文。
+       * 同模型时原样复用,保持共享前缀。
        */
       const sharedPrefix = sharesCompactionPrefix(userMessage.model, model)
-      const system = sharedPrefix ? [...(input.system ?? [])] : []
+      const system = sharedPrefix
+        ? [...(input.system ?? [])]
+        : (input.system ?? []).map((block) => replaceEnvironmentBlock(block, model))
       const cfg = yield* config.get()
       const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
       const prior = completedCompactions(history)
