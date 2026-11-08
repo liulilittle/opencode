@@ -23,6 +23,7 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { buildPrompt } from "@opencode-ai/core/session/compaction"
 import { SessionCompactionEvent } from "@opencode-ai/schema/session-compaction-event"
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 
 export const Event = SessionCompactionEvent
 
@@ -197,6 +198,12 @@ export interface Interface {
      overflow?: boolean
      system?: string[]
      tools?: Record<string, Tool>
+     /**
+      * 与主请求同一份 session 权限。`LLMRequestPrep.resolveTools` 用
+      * `Permission.merge(agent.permission, permission)` 过滤工具集,缺了它压缩请求
+      * 保留的工具与主请求不同 → tools 前缀不一致,共享前缀失效。
+      */
+     permission?: PermissionV1.Ruleset
    }) => Effect.Effect<"continue" | "stop">
   readonly create: (input: {
     sessionID: SessionID
@@ -373,6 +380,8 @@ const layer = Layer.effect(
        * 同时 toolChoice="none" 保证压缩模型不会调用工具。
        */
       tools?: Record<string, Tool>
+      /** 见 Interface.process:同一份 session 权限才能过滤出同一工具集。 */
+      permission?: PermissionV1.Ruleset
     }) {
       const parent = input.messages.findLast((m) => m.info.id === input.parentID)
       if (!parent || parent.info.role !== "user") {
@@ -559,6 +568,7 @@ const layer = Layer.effect(
         user: userMessage,
         agent,
         sessionID: input.sessionID,
+        permission: input.permission,
         tools: sharedTools ?? {},
         ...(sharedTools && input.tools ? { toolChoice: "none" as const } : {}),
         system,

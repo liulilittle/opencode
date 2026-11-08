@@ -1198,6 +1198,12 @@ const layer = Layer.effect(
               overflow: task.overflow,
               system,
               tools: lastResolvedTools,
+              /**
+               * 必须与下方主请求传同一份 session 权限:`LLMRequestPrep.resolveTools`
+               * 会按 `Permission.merge(agent.permission, permission)` 过滤工具集,
+               * 缺了它压缩请求保留的工具与主请求不同 → tools 前缀不一致。
+               */
+              permission: session.permission,
             })
             if (result === "stop") break
             continue

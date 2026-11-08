@@ -1303,6 +1303,81 @@ describe("session.llm.stream", () => {
   )
 
   it.instance(
+    "filters the tool set by session permission (compaction must pass the same ruleset)",
+    () =>
+      Effect.gen(function* () {
+        const fixture = loadFixture(alibabaQwenFixture.providerID, alibabaQwenFixture.modelID)
+        const resolved = yield* Provider.use.getModel(
+          ProviderV2.ID.make(alibabaQwenFixture.providerID),
+          ModelV2.ID.make(fixture.model.id),
+        )
+        const sessionID = SessionID.make("session-test-perm-tools")
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+        const user = {
+          id: MessageID.make("msg_user-perm-tools"),
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: agent.name,
+          model: { providerID: ProviderV2.ID.make(alibabaQwenFixture.providerID), modelID: resolved.id },
+        } satisfies SessionV1.User
+        const tools = {
+          bash: tool({ description: "run bash", inputSchema: z.object({}), execute: async () => ({ output: "" }) }),
+          read: tool({ description: "read", inputSchema: z.object({}), execute: async () => ({ output: "" }) }),
+        }
+
+        const sentTools = (permission: PermissionV1.Ruleset | undefined) =>
+          Effect.gen(function* () {
+            const request = waitRequest(
+              "/chat/completions",
+              new Response(createChatStream("Hello"), {
+                status: 200,
+                headers: { "Content-Type": "text/event-stream" },
+              }),
+            )
+            yield* drain({
+              user,
+              sessionID,
+              model: resolved,
+              agent,
+              permission,
+              system: ["You are a helpful assistant."],
+              messages: [{ role: "user", content: "Hello" }],
+              tools,
+            })
+            const capture = yield* Effect.promise(() => request)
+            const body = capture.body.tools as Array<{ function?: { name?: string } }> | undefined
+            return (body ?? []).map((item) => item.function?.name).toSorted()
+          })
+
+        // 主请求:session 权限 deny bash → 只发 read。
+        const main = yield* sentTools([{ permission: "bash", pattern: "*", action: "deny" }])
+        expect(main).toEqual(["read"])
+        // 压缩请求漏传 permission 时会退化为全量工具集(前缀不一致)。
+        const noPermission = yield* sentTools(undefined)
+        expect(noPermission).toEqual(["bash", "read"])
+        // 传同一份权限才与主请求逐字节一致。
+        const sameAsMain = yield* sentTools([{ permission: "bash", pattern: "*", action: "deny" }])
+        expect(sameAsMain).toEqual(main)
+      }),
+    {
+      config: () => ({
+        enabled_providers: [alibabaQwenFixture.providerID],
+        provider: {
+          [alibabaQwenFixture.providerID]: {
+            options: { apiKey: "test-key", baseURL: `${state.server!.url.origin}/v1` },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
     "sends responses API payload for OpenAI models",
     () =>
       Effect.gen(function* () {

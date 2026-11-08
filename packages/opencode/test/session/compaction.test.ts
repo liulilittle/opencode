@@ -1772,6 +1772,42 @@ describe("session.compaction.process", () => {
     { git: true },
   )
 
+  itCompaction.instance(
+    "forwards the session permission so tool filtering matches the main request",
+    () => {
+      const stub = llm()
+      let captured: LLM.StreamInput | undefined
+      stub.push(
+        reply("summary", (input) => {
+          captured = input
+        }),
+      )
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "hello")
+        yield* createCompactionMarker(session.id)
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        const permission = [{ permission: "bash", action: "deny" as const, pattern: "*" }]
+        yield* SessionCompaction.use.process({
+          parentID: parent!,
+          messages: msgs,
+          sessionID: session.id,
+          auto: false,
+          tools: {},
+          permission,
+        })
+
+        // 漏传 permission 会让 resolveTools 保留主请求已 deny 的工具 → tools 前缀不一致。
+        expect(captured?.permission).toBe(permission)
+      }).pipe(withCompaction({ llm: stub.llmLayer }))
+    },
+    { git: true },
+  )
+
   test("shares the parent tool set only when the compaction model matches", () => {
     const parent = { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test-model") }
     const base = createModel({ context: 1, output: 1 })
