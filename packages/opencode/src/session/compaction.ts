@@ -429,7 +429,13 @@ const layer = Layer.effect(
       const model = compactionAgent.model
         ? yield* provider.getModel(compactionAgent.model.providerID, compactionAgent.model.modelID).pipe(Effect.orDie)
         : yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID).pipe(Effect.orDie)
-      const system = [...(input.system ?? [])]
+      /**
+       * 父请求的 system 前缀由父模型的环境块构成(system.ts 会写入模型名与
+       * provider/model id)。压缩换模型时这段文本对压缩请求不成立,且本就不是
+       * 同一缓存域,必须丢弃;同模型时才原样复用(共享前缀)。
+       */
+      const sharedPrefix = sharesCompactionPrefix(userMessage.model, model)
+      const system = sharedPrefix ? [...(input.system ?? [])] : []
       const cfg = yield* config.get()
       const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
       const prior = completedCompactions(history)
@@ -491,7 +497,7 @@ const layer = Layer.effect(
           .join("\n\n")
       let nextPrompt = build()
       let historyMessages = custom ? [] : yield* MessageV2.toModelMessagesEffect(msgs, model)
-      const sharedTools = sharesCompactionPrefix(userMessage.model, model) ? input.tools : undefined
+      const sharedTools = sharedPrefix ? input.tools : undefined
       const tailText = () =>
         custom
           ? [nextPrompt, "The following is the conversation history:", conversation].filter(Boolean).join("\n\n")

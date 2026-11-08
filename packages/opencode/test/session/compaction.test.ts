@@ -1820,6 +1820,64 @@ describe("session.compaction.process", () => {
   })
 
   itCompaction.instance(
+    "does not carry the parent system prefix onto a different compaction model",
+    () => {
+      const stub = llm()
+      let captured: LLM.StreamInput | undefined
+      stub.push(
+        reply("summary", (input) => {
+          captured = input
+        }),
+      )
+      // provider 能返回两个模型:父请求用 test-model,压缩配成 other-model。
+      const parentModel = createModel({ context: 100_000, output: 32_000 })
+      const otherModel = { ...parentModel, id: "other-model" }
+      const provider = ProviderTest.fake({
+        model: parentModel,
+        getModel: Effect.fn("TestProvider.getModel.multi")((providerID, modelID) =>
+          providerID === parentModel.providerID && modelID === otherModel.id
+            ? Effect.succeed(otherModel)
+            : providerID === parentModel.providerID && modelID === parentModel.id
+              ? Effect.succeed(parentModel)
+              : Effect.die(new Error(`Unknown test model: ${providerID}/${modelID}`)),
+        ) as never,
+      })
+      const configLayer = Layer.succeed(
+        Config.Service,
+        TestConfig.make({
+          get: () =>
+            Effect.succeed({
+              ...(Schema.decodeUnknownSync(ConfigV1.Info)({}) as ConfigV1.Info),
+              agent: { compaction: { model: `${parentModel.providerID}/${otherModel.id}` } },
+            } as ConfigV1.Info),
+        }),
+      )
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "hello")
+        yield* createCompactionMarker(session.id)
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({
+          parentID: parent!,
+          messages: msgs,
+          sessionID: session.id,
+          auto: false,
+          system: ["PARENT_SYSTEM_ENV"],
+        })
+
+        expect(captured).toBeDefined()
+        // 父 system 由父模型环境块构成(含模型名),对压缩模型不成立且不同缓存域。
+        expect(captured!.system.includes("PARENT_SYSTEM_ENV")).toBe(false)
+      }).pipe(withCompaction({ llm: stub.llmLayer, provider, config: configLayer }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
     "fits the compaction request against system, messages and the shared tool set",
     () => {
       const stub = llm()
