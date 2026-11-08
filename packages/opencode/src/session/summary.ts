@@ -87,6 +87,27 @@ export function capDiffs(diffs: Snapshot.FileDiff[]): Snapshot.FileDiff[] {
   return out
 }
 
+/** 摘要补丁未变化时不重写消息:每次用户消息的 summary.diffs 会随 message.updated
+ *  整包持久化并广播,重复写同一份补丁会让事件日志按更新次数倍增长(实测单条消息
+ *  71 次更新只有 8 个不同版本,占事件库约 9 倍空间)。逐字段比较,顺序不同视为
+ *  变化(保守:宁可多写一次)。 */
+export function shouldUpdateSummaryDiffs(
+  prev: readonly Snapshot.FileDiff[] | undefined,
+  next: readonly Snapshot.FileDiff[],
+): boolean {
+  if (prev === undefined) return true
+  if (prev.length !== next.length) return true
+  for (let i = 0; i < prev.length; i++) {
+    const a = prev[i]!
+    const b = next[i]!
+    if (a.file !== b.file) return true
+    if (a.additions !== b.additions) return true
+    if (a.deletions !== b.deletions) return true
+    if (a.patch !== b.patch) return true
+  }
+  return false
+}
+
 export interface Interface {
   readonly summarize: (input: { sessionID: SessionID; messageID: MessageID }) => Effect.Effect<void>
   readonly diff: (input: { sessionID: SessionID; messageID?: MessageID }) => Effect.Effect<Snapshot.FileDiff[]>
@@ -145,8 +166,10 @@ const layer = Layer.effect(
       )
       const target = messages.find((m) => m.info.id === input.messageID)
       if (!target || target.info.role !== "user") return
-      const msgDiffs = yield* computeDiff({ messages })
-      target.info.summary = { ...target.info.summary, diffs: capDiffs(msgDiffs) }
+      const nextDiffs = capDiffs(yield* computeDiff({ messages }))
+      // 未变化则零写入:否则同一份大补丁按更新次数重复持久化(事件库膨胀主因)。
+      if (!shouldUpdateSummaryDiffs(target.info.summary?.diffs, nextDiffs)) return
+      target.info.summary = { ...target.info.summary, diffs: nextDiffs }
       yield* sessions.updateMessage(target.info)
     })
 
