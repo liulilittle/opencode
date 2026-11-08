@@ -826,6 +826,43 @@ it.instance("compaction reuses the real user message so per-request overrides su
   }),
 )
 
+it.instance("compaction fallback keeps the StructuredOutput tool on json_schema turns", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const compaction = yield* SessionCompaction.Service
+    const chat = yield* sessions.create({
+      title: "Structured tools",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    yield* sessions.updateMessage({
+      id: MessageID.ascending(),
+      role: "user",
+      sessionID: chat.id,
+      agent: "build",
+      model: ref,
+      format: new SessionV1.OutputFormatJsonSchema({
+        type: "json_schema",
+        schema: { type: "object", properties: {} },
+        retryCount: 0,
+      }),
+      time: { created: Date.now() },
+    } as unknown as SessionV1.User)
+    yield* compaction.create({ sessionID: chat.id, agent: "build", model: ref, auto: true })
+    yield* llm.text("summary")
+
+    yield* prompt.loop({ sessionID: chat.id })
+
+    const hits = yield* llm.hits
+    const body = hits[0]?.body as { tools?: Array<{ function?: { name?: string } }> } | undefined
+    const names = (body?.tools ?? []).map((item) => item.function?.name)
+    // 主请求在该回合一定会注入 StructuredOutput(见 prompt.ts 的 json_schema 分支);
+    // 压缩请求的工具集必须与之一致,否则 tools 前缀不同、缓存整段失效。
+    expect(names).toContain("StructuredOutput")
+  }),
+)
+
 it.instance("loop stops provider overflow instead of auto-compacting when disabled", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig((url) => ({

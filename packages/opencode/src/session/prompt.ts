@@ -1228,6 +1228,18 @@ const layer = Layer.effect(
                 Effect.provideService(Truncate.Service, truncate),
                 Effect.provideService(RuntimeFlags.Service, flags),
               ))
+            /**
+             * 与主请求的 json_schema 分支保持一致:主请求在该回合一定注入
+             * StructuredOutput(见下方 createStructuredOutputTool),快照路径因快照点
+             * 位于注入之后而自然包含它;此处是惰性重建,必须同样补上,
+             * 否则压缩请求的 tools 集比主请求少一个 → 前缀不命中。
+             */
+            if (lastResolvedTools === undefined && prompted?.info.role === "user" && prompted.info.format?.type === "json_schema") {
+              tools["StructuredOutput"] = createStructuredOutputTool({
+                schema: prompted.info.format.schema,
+                onSuccess() {},
+              })
+            }
             const result = yield* compaction.process({
               messages: msgs,
               parentID: lastUser.id,
