@@ -1784,6 +1784,38 @@ describe("session.compaction.process", () => {
   })
 
   itCompaction.instance(
+    "fits the compaction request against system, messages and the shared tool set",
+    () => {
+      const stub = llm()
+      // 若估算漏掉 tools,会真的发出请求并消费这条回复(结果为 continue)。
+      stub.push(reply("summary"))
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "older")
+        yield* createUserMessage(session.id, "recent")
+        yield* createCompactionMarker(session.id)
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        // 400K ASCII 字符 ≈ 125K tokens,单独就超过 test 模型 100K 上下文的可用预算。
+        const tools = { big: { description: "x".repeat(400_000) } } as unknown as Record<string, never>
+        const result = yield* SessionCompaction.use.process({
+          parentID: parent!,
+          messages: msgs,
+          sessionID: session.id,
+          auto: false,
+          tools,
+        })
+        // 超限必须拒绝发送(trim-limit),不得向 provider 发可能被拒的请求。
+        expect(result).toBe("stop")
+      }).pipe(withCompaction({ llm: stub.llmLayer }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
     "keeps plugin context outside the serialized conversation",
     () => {
       const stub = llm()

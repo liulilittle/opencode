@@ -15,7 +15,7 @@ import { NotFoundError } from "@/storage/storage"
 import { Effect, Layer, Context } from "effect"
 import type { Tool } from "ai"
 import { InstanceState } from "@/effect/instance-state"
-import { isOverflow as overflow, usable } from "./overflow"
+import { isOverflow as overflow, estimateRequestTokens, usable } from "./overflow"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -473,8 +473,21 @@ const layer = Layer.effect(
           .join("\n\n")
       let nextPrompt = build()
       let historyMessages = custom ? [] : yield* MessageV2.toModelMessagesEffect(msgs, model)
+      const sharedTools = sharesCompactionPrefix(userMessage.model, model) ? input.tools : undefined
+      const tailText = () =>
+        custom
+          ? [nextPrompt, "The following is the conversation history:", conversation].filter(Boolean).join("\n\n")
+          : nextPrompt
+      /**
+       * 必须按"最终请求"估算(system + messages + tools),否则加 tools 后低估,
+       * 裁剪不足会向 provider 发送超限请求(llm.ts 硬门与 prompt.ts 预检同口径)。
+       */
       const estimateRequest = () =>
-        Token.estimate(nextPrompt) + (custom ? 0 : Token.estimate(JSON.stringify(historyMessages)))
+        estimateRequestTokens({
+          system,
+          messages: [...historyMessages, { role: "user", content: [{ type: "text", text: tailText() }] }],
+          tools: sharedTools,
+        })
       let dropped = 0
       while (limit > 0 && estimateRequest() > limit && head.length > 1) {
         const all = turns(head, { hard: new Set(pins.hard ?? []), soft: new Set(pins.soft ?? []) })
@@ -546,8 +559,8 @@ const layer = Layer.effect(
         user: userMessage,
         agent,
         sessionID: input.sessionID,
-        tools: sharesCompactionPrefix(userMessage.model, model) ? (input.tools ?? {}) : {},
-        ...(sharesCompactionPrefix(userMessage.model, model) && input.tools ? { toolChoice: "none" as const } : {}),
+        tools: sharedTools ?? {},
+        ...(sharedTools && input.tools ? { toolChoice: "none" as const } : {}),
         system,
         messages: [
           ...historyMessages,
@@ -556,9 +569,7 @@ const layer = Layer.effect(
             content: [
               {
                 type: "text",
-                text: custom
-                  ? [nextPrompt, "The following is the conversation history:", conversation].filter(Boolean).join("\n\n")
-                  : nextPrompt,
+                text: tailText(),
               },
             ],
           },
