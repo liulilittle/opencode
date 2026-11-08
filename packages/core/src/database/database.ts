@@ -46,7 +46,7 @@ export function path() {
     return join(Global.Path.data, Flag.OPENCODE_DB)
   }
   if (
-    ["latest", "beta", "prod"].includes(InstallationChannel) ||
+    ["latest", "beta", "prod", "main"].includes(InstallationChannel) ||
     process.env.OPENCODE_DISABLE_CHANNEL_DB === "1" ||
     process.env.OPENCODE_DISABLE_CHANNEL_DB === "true"
   )
