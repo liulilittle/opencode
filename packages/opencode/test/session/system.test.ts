@@ -10,6 +10,19 @@ import { SystemPrompt } from "../../src/session/system"
 import { MCP } from "../../src/mcp"
 import { testEffect } from "../lib/effect"
 
+describe("SystemPrompt.environmentDate", () => {
+  test("pins the environment date to the session start", () => {
+    const created = Date.UTC(2020, 0, 1, 0, 0, 0)
+    expect(SystemPrompt.environmentDate(created)).toBe(new Date(created).toDateString())
+    expect(SystemPrompt.environmentDate(created)).toBe(SystemPrompt.environmentDate(created))
+  })
+
+  test("falls back to the current date when omitted", () => {
+    const now = new Date().toDateString()
+    expect(SystemPrompt.environmentDate()).toBe(now)
+  })
+})
+
 const skills: Skill.Info[] = [
   {
     name: "zeta-skill",

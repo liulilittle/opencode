@@ -50,8 +50,22 @@ export function provider(model: Provider.Model) {
   return [PROMPT_DEFAULT]
 }
 
+/**
+ * Date string shown in the environment block. Pinned to the session start so the
+ * prompt prefix does not change at midnight (which would invalidate the whole
+ * provider prefix cache mid-conversation).
+ */
+export function environmentDate(sessionCreatedAt?: number): string {
+  return new Date(sessionCreatedAt ?? Date.now()).toDateString()
+}
+
 export interface Interface {
-  readonly environment: (model: Provider.Model) => Effect.Effect<string[]>
+  /**
+   * `sessionCreatedAt` pins the reported date to the session start so the prompt
+   * prefix stays byte-identical across days (a changing date invalidates the
+   * provider prefix cache for the whole conversation).
+   */
+  readonly environment: (model: Provider.Model, sessionCreatedAt?: number) => Effect.Effect<string[]>
   readonly skills: (agent: Agent.Info) => Effect.Effect<string | undefined>
   readonly mcp: (agent: Agent.Info, permission?: PermissionV1.Ruleset) => Effect.Effect<string | undefined>
 }
@@ -66,8 +80,10 @@ const layer = Layer.effect(
     const locations = yield* LocationServiceMap.Service
 
     return Service.of({
-      environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
+      environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model, sessionCreatedAt?: number) {
         const ctx = yield* InstanceState.context
+        // 会话内固定日期:跨天不得改变前缀,否则整段前缀缓存失效。
+        const today = environmentDate(sessionCreatedAt)
         const references = yield* Effect.gen(function* () {
           return (yield* (yield* Reference.Service).list()).filter((reference) => reference.description !== undefined)
         }).pipe(Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))))
@@ -80,7 +96,7 @@ const layer = Layer.effect(
             `  Workspace root folder: ${ctx.worktree}`,
             `  Is directory a git repo: ${ctx.project.vcs === "git" ? "yes" : "no"}`,
             `  Platform: ${process.platform}`,
-            `  Today's date: ${new Date().toDateString()}`,
+            `  Today's date: ${today}`,
             `</env>`,
           ].join("\n"),
           references.length === 0
