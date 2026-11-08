@@ -1190,6 +1190,35 @@ const layer = Layer.effect(
           }
 
           if (task?.type === "compaction") {
+            /**
+             * 插件经 `client.session.summarize` 触发压缩时会新起一个 runLoop,
+             * 此时还没有主请求快照(lastResolvedTools 为 undefined)。必须现解析
+             * 同一份 tools,否则压缩请求不带 tools → system+tools+history 前缀
+             * 与主请求不一致,provider 前缀缓存整段失效。
+             * `toolChoice="none"` 保证工具不会执行,故 handle 只需满足解析接口。
+             */
+            const tools =
+              lastResolvedTools ??
+              (yield* SessionTools.resolve({
+                agent,
+                session,
+                model,
+                processor: {
+                  message: { id: lastUser.id } as unknown as SessionV1.Assistant,
+                  updateToolCall: () => Effect.succeed(undefined),
+                  completeToolCall: () => Effect.void,
+                },
+                bypassAgentCheck: false,
+                messages: msgs,
+                promptOps: yield* ops(),
+              }).pipe(
+                Effect.provideService(Plugin.Service, plugin),
+                Effect.provideService(Permission.Service, permission),
+                Effect.provideService(ToolRegistry.Service, registry),
+                Effect.provideService(MCP.Service, mcp),
+                Effect.provideService(Truncate.Service, truncate),
+                Effect.provideService(RuntimeFlags.Service, flags),
+              ))
             const result = yield* compaction.process({
               messages: msgs,
               parentID: lastUser.id,
@@ -1197,7 +1226,7 @@ const layer = Layer.effect(
               auto: task.auto,
               overflow: task.overflow,
               system,
-              tools: lastResolvedTools,
+              tools,
               /**
                * 必须与下方主请求传同一份 session 权限:`LLMRequestPrep.resolveTools`
                * 会按 `Permission.merge(agent.permission, permission)` 过滤工具集,

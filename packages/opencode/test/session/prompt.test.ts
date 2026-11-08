@@ -740,6 +740,31 @@ it.instance("preflights the model limit and compacts before an oversized request
   }),
 )
 
+it.instance("compaction started by an external summarize shares the main request tool set", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const compaction = yield* SessionCompaction.Service
+    const chat = yield* sessions.create({
+      title: "External summarize",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    yield* seed(chat.id, { finish: "stop" })
+    // 模拟插件 client.session.summarize:先建压缩标记,再起一个新的 runLoop。
+    yield* compaction.create({ sessionID: chat.id, agent: "build", model: ref, auto: true })
+    yield* llm.text("summary")
+
+    yield* prompt.loop({ sessionID: chat.id })
+
+    const hits = yield* llm.hits
+    const body = hits[0]?.body as { tools?: Array<{ function?: { name?: string } }> } | undefined
+    // 压缩请求必须带与主请求相同的 tools,否则 system+tools+history 前缀不一致,
+    // provider 前缀缓存整段失效。
+    expect(Array.isArray(body?.tools) && body.tools.length > 0).toBe(true)
+  }),
+)
+
 it.instance("loop stops provider overflow instead of auto-compacting when disabled", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig((url) => ({
