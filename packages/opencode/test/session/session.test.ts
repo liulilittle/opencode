@@ -283,3 +283,52 @@ describe("Session", () => {
     }),
   )
 })
+
+describe("message.updated dedupe", () => {
+  it.instance("identical message snapshot is published once", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const bridge = yield* EventV2Bridge.Service
+      const published: unknown[] = []
+      const unsub = yield* bridge.listen((event) => {
+        if (event.type === SessionV1.Event.MessageUpdated.type) published.push(event.data)
+        return Effect.void
+      })
+      yield* Effect.addFinalizer(() => unsub)
+
+      const info = yield* session.create({})
+      const msg = {
+        id: "msg_dedupe_probe_1",
+        sessionID: info.id,
+        role: "user",
+        time: { created: 0 },
+        agent: "user",
+        model: { providerID: "test", modelID: "test" },
+        tools: {},
+        mode: "",
+      } as unknown as SessionV1.Info
+
+      const settle = Effect.sleep("20 millis")
+      yield* session.updateMessage(msg)
+      yield* settle
+      expect(published.length).toBe(1)
+
+      // 逐字节相同的快照:不得再次发布(重复发布只会整包写事件日志并广播)。
+      yield* session.updateMessage(JSON.parse(JSON.stringify(msg)) as SessionV1.Info)
+      yield* settle
+      expect(published.length).toBe(1)
+
+      // 正控:内容变化必须发布。
+      yield* session.updateMessage({ ...msg, time: { created: 1 } } as SessionV1.Info)
+      yield* settle
+      expect(published.length).toBe(2)
+
+      // 再变回旧内容属于新状态,也必须发布(只与最近一次比较)。
+      yield* session.updateMessage(JSON.parse(JSON.stringify(msg)) as SessionV1.Info)
+      yield* settle
+      expect(published.length).toBe(3)
+
+      yield* session.remove(info.id)
+    }),
+  )
+})

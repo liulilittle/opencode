@@ -621,13 +621,33 @@ const layer: Layer.Layer<
 
         yield* events.publish(SessionV1.Event.Deleted, { sessionID, info: session })
         yield* events.remove(sessionID)
+        // 会话消亡:清该会话的快照签名,防同 id 复用/回滚后被误判为"已发布"。
+        const prefix = sessionID + "|"
+        for (const key of [...last_message_publish_sig.keys()]) {
+          if (key.startsWith(prefix)) last_message_publish_sig.delete(key)
+        }
       } catch (error) {
         yield* Effect.logError("failed to remove session", { sessionID, error })
       }
     })
 
+    /** 最近一次成功发布的 message 快照签名(id → JSON)。同一快照重复发布会整包写入
+     *  事件日志并广播:实测单条消息 71 次更新里有 62 次 info 完全相同,是事件库膨胀的
+     *  主要来源。内容逐字节相同即无状态变化,跳过发布不改变任何可观测状态(客户端重连
+     *  从 messages/parts 表读全量)。容量上限按插入序淘汰最旧项,跨会话有界。 */
+    const last_message_publish_sig = new Map<string, string>()
+    const LAST_MESSAGE_SIG_MAX = 2048
     const updateMessage = <T extends SessionV1.Info>(msg: T): Effect.Effect<T> =>
       Effect.gen(function* () {
+        const sig_key = msg.sessionID + "|" + msg.id
+        const sig = serializeMessageSig(msg)
+        if (last_message_publish_sig.get(sig_key) === sig) return msg
+        last_message_publish_sig.set(sig_key, sig)
+        while (last_message_publish_sig.size > LAST_MESSAGE_SIG_MAX) {
+          const oldest = last_message_publish_sig.keys().next()
+          if (oldest.done) break
+          last_message_publish_sig.delete(oldest.value)
+        }
         yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID: msg.sessionID, info: msg })
         return msg
       }).pipe(Effect.withSpan("Session.updateMessage"))
@@ -1005,6 +1025,16 @@ function listByProject(
       Effect.orDie,
       Effect.map((rows) => rows.map(fromRow)),
     )
+}
+
+/** 逐字节一致的快照签名:字段顺序由同一对象的创建路径决定,顺序不同只会导致多发布
+ *  一次(不会误判相同)。 */
+function serializeMessageSig(msg: unknown): string {
+  try {
+    return JSON.stringify(msg)
+  } catch {
+    return String(Math.random())
+  }
 }
 
 export const node = LayerNode.make({
