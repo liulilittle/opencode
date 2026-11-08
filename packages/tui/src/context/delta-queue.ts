@@ -56,6 +56,20 @@ export function createDeltaQueue(options: {
     return options.base_ms
   }
 
+  const PART_LEN_LIMIT = 4096
+
+  /** 只用于估算批窗口的旁路计数;跨会话长期运行不得无界增长,超限按插入序淘汰最旧项。 */
+  const note_len = (partID: string, len: number): void => {
+    const prev = part_len.get(partID) ?? 0
+    part_len.delete(partID)
+    part_len.set(partID, prev + len)
+    while (part_len.size > PART_LEN_LIMIT) {
+      const oldest = part_len.keys().next()
+      if (oldest.done) break
+      part_len.delete(oldest.value)
+    }
+  }
+
   const entry_for = (d: { sessionID: string; messageID: string; partID: string }): Entry => {
     const cur = pending.get(d.partID)
     if (cur) return cur
@@ -78,7 +92,7 @@ export function createDeltaQueue(options: {
     pending.clear()
     const batch: AppliedPart[] = []
     for (const e of entries) {
-      for (const [field, text] of e.fields) part_len.set(e.partID, (part_len.get(e.partID) ?? 0) + text.length)
+      for (const [field, text] of e.fields) note_len(e.partID, text.length)
       batch.push({
         sessionID: e.sessionID,
         messageID: e.messageID,
@@ -110,5 +124,6 @@ export function createDeltaQueue(options: {
     flush,
     delay_for,
     pending_count: () => pending.size,
+    tracked_parts: () => part_len.size,
   }
 }

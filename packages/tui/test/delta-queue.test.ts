@@ -124,6 +124,17 @@ describe("delta queue", () => {
     expect(batches[0]![0]!.part).toEqual({ id: "part-1", type: "text", text: "two" })
   })
 
+  test("stops tracking part lengths past the cap", () => {
+    const clock = fakeClock()
+    const queue = createDeltaQueue({ base_ms: 60, apply: () => {}, timer: clock.timer })
+    for (let i = 0; i < 5000; i++) {
+      queue.queue(delta("x", `part-${i}`))
+      clock.advance(60)
+    }
+    expect(queue.tracked_parts()).toBeLessThanOrEqual(4096)
+    expect(queue.tracked_parts()).toBeGreaterThan(0)
+  })
+
   test("widens the window as the part grows", () => {
     const clock = fakeClock()
     const queue = createDeltaQueue({ base_ms: 60, apply: () => {}, timer: clock.timer })
