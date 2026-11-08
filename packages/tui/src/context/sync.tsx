@@ -25,7 +25,7 @@ import { useProject } from "./project"
 import { useEvent } from "./event"
 import { useSDK } from "./sdk"
 import { useTuiStartup } from "./runtime"
-import { createDeltaQueue, type Delta } from "./delta-queue"
+import { createDeltaQueue, type Delta, type PartSnapshot } from "./delta-queue"
 import { createSimpleContext } from "./helper"
 import { useExit } from "./exit"
 import { useArgs } from "./args"
@@ -70,7 +70,7 @@ export const {
     const delta_batch_ms = (() => {
       const env = Number(process.env.OPENCODE_TUI_DELTA_MS)
       if (Number.isFinite(env) && env >= 16 && env <= 1000) return env
-      const saved = Number(kv.get("tui_delta_batch_ms", 60))
+      const saved = Number(kv.get("tui_delta_batch_ms", 80))
       if (Number.isFinite(saved) && saved >= 16 && saved <= 1000) return saved
       return 60
     })()
@@ -186,19 +186,41 @@ export const {
       base_ms: delta_batch_ms,
       apply: (batch) => {
         for (const d of batch) {
+          if (d.part !== undefined) {
+            touchPart(d.sessionID, d.partID)
+            const parts = store.part[d.messageID]
+            if (!parts) {
+              setStore("part", d.messageID, [d.part as never])
+            } else {
+              const found = search(parts, d.partID, (part) => part.id)
+              if (found.found) {
+                setStore("part", d.messageID, found.index, reconcile(d.part as never))
+              } else {
+                setStore(
+                  "part",
+                  d.messageID,
+                  produce((draft) => {
+                    draft.splice(found.index, 0, d.part as never)
+                  }),
+                )
+              }
+            }
+          }
+          if (d.appends.length === 0) continue
           const parts = store.part[d.messageID]
           if (!parts) continue
-          const result = search(parts, d.partID, (part) => part.id)
-          if (!result.found) continue
+          const found = search(parts, d.partID, (part) => part.id)
+          if (!found.found) continue
           touchPart(d.sessionID, d.partID)
           setStore(
             "part",
             d.messageID,
             produce((draft) => {
-              const part = draft[result.index]
-              const field = d.field as keyof typeof part
-              const existing = part[field] as string | undefined
-              ;(part[field] as string) = (existing ?? "") + d.text
+              const part = draft[found.index] as Record<string, unknown>
+              for (const a of d.appends) {
+                const existing = part[a.field] as string | undefined
+                part[a.field] = (existing ?? "") + a.text
+              }
             }),
           )
         }
@@ -206,6 +228,7 @@ export const {
     })
     const flush_pending_deltas = (): void => delta_queue.flush()
     const queue_delta = (d: PendingDelta): void => delta_queue.queue(d)
+    const queue_part = (d: PartSnapshot): void => delta_queue.queue_part(d)
 
     event.subscribe((event, { directory, workspace }) => {
       switch (event.type) {
@@ -410,25 +433,12 @@ export const {
           break
         }
         case "message.part.updated": {
-          flush_pending_deltas()
-          touchPart(event.properties.part.sessionID, event.properties.part.id)
-          const parts = store.part[event.properties.part.messageID]
-          if (!parts) {
-            setStore("part", event.properties.part.messageID, [event.properties.part])
-            break
-          }
-          const result = search(parts, event.properties.part.id, (part) => part.id)
-          if (result.found) {
-            setStore("part", event.properties.part.messageID, result.index, reconcile(event.properties.part))
-            break
-          }
-          setStore(
-            "part",
-            event.properties.part.messageID,
-            produce((draft) => {
-              draft.splice(result.index, 0, event.properties.part)
-            }),
-          )
+          queue_part({
+            sessionID: event.properties.part.sessionID,
+            messageID: event.properties.part.messageID,
+            partID: event.properties.part.id,
+            part: event.properties.part,
+          })
           break
         }
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { createDeltaQueue, type Delta, type DeltaTimer } from "../src/context/delta-queue"
+import { createDeltaQueue, type AppliedPart, type Delta, type DeltaTimer } from "../src/context/delta-queue"
 
 function fakeClock() {
   let now = 0
@@ -38,10 +38,20 @@ const delta = (text: string, partID = "part-1"): Delta => ({
   text,
 })
 
+const snapshot = (partID: string, text: string) => ({
+  sessionID: "ses-1",
+  messageID: "msg-1",
+  partID,
+  part: { id: partID, type: "text", text },
+})
+
+const appended = (entry: AppliedPart | undefined, field = "text") =>
+  entry?.appends.find((a) => a.field === field)?.text
+
 describe("delta queue", () => {
   test("coalesces deltas of the same part into one apply", () => {
     const clock = fakeClock()
-    const batches: Delta[][] = []
+    const batches: AppliedPart[][] = []
     const queue = createDeltaQueue({ base_ms: 60, apply: (b) => batches.push(b), timer: clock.timer })
 
     queue.queue(delta("hel"))
@@ -53,12 +63,13 @@ describe("delta queue", () => {
     clock.advance(60)
     expect(batches).toHaveLength(1)
     expect(batches[0]).toHaveLength(1)
-    expect(batches[0][0]!.text).toBe("hello world")
+    expect(appended(batches[0]![0])).toBe("hello world")
+    expect(batches[0]![0]!.part).toBeUndefined()
   })
 
   test("keeps separate parts separate within one batch", () => {
     const clock = fakeClock()
-    const batches: Delta[][] = []
+    const batches: AppliedPart[][] = []
     const queue = createDeltaQueue({ base_ms: 60, apply: (b) => batches.push(b), timer: clock.timer })
 
     queue.queue(delta("a", "part-1"))
@@ -66,7 +77,51 @@ describe("delta queue", () => {
     clock.advance(60)
 
     expect(batches).toHaveLength(1)
-    expect(batches[0]!.map((d) => d.text).sort()).toEqual(["a", "b"])
+    expect(batches[0]!.map((e) => appended(e)).sort()).toEqual(["a", "b"])
+  })
+
+  test("snapshot supersedes deltas queued before it", () => {
+    const clock = fakeClock()
+    const batches: AppliedPart[][] = []
+    const queue = createDeltaQueue({ base_ms: 60, apply: (b) => batches.push(b), timer: clock.timer })
+
+    queue.queue(delta("abc"))
+    queue.queue_part(snapshot("part-1", "abc"))
+    clock.advance(60)
+
+    expect(batches).toHaveLength(1)
+    expect(batches[0]).toHaveLength(1)
+    expect(batches[0]![0]!.part).toEqual({ id: "part-1", type: "text", text: "abc" })
+    expect(batches[0]![0]!.appends).toEqual([])
+  })
+
+  test("deltas queued after a snapshot are appended on top of it", () => {
+    const clock = fakeClock()
+    const batches: AppliedPart[][] = []
+    const queue = createDeltaQueue({ base_ms: 60, apply: (b) => batches.push(b), timer: clock.timer })
+
+    queue.queue(delta("x"))
+    queue.queue_part(snapshot("part-1", "x"))
+    queue.queue(delta("y"))
+    clock.advance(60)
+
+    expect(batches).toHaveLength(1)
+    expect(batches[0]![0]!.part).toEqual({ id: "part-1", type: "text", text: "x" })
+    expect(appended(batches[0]![0])).toBe("y")
+  })
+
+  test("last snapshot in a window wins", () => {
+    const clock = fakeClock()
+    const batches: AppliedPart[][] = []
+    const queue = createDeltaQueue({ base_ms: 60, apply: (b) => batches.push(b), timer: clock.timer })
+
+    queue.queue_part(snapshot("part-1", "one"))
+    queue.queue_part(snapshot("part-1", "two"))
+    clock.advance(60)
+
+    expect(batches).toHaveLength(1)
+    expect(batches[0]).toHaveLength(1)
+    expect(batches[0]![0]!.part).toEqual({ id: "part-1", type: "text", text: "two" })
   })
 
   test("widens the window as the part grows", () => {
@@ -96,7 +151,7 @@ describe("delta queue", () => {
 
   test("flush applies immediately and arms a fresh timer afterwards", () => {
     const clock = fakeClock()
-    const batches: Delta[][] = []
+    const batches: AppliedPart[][] = []
     const queue = createDeltaQueue({ base_ms: 60, apply: (b) => batches.push(b), timer: clock.timer })
 
     queue.queue(delta("a"))
@@ -111,11 +166,11 @@ describe("delta queue", () => {
     expect(clock.scheduled()).toEqual([60])
     clock.advance(60)
     expect(batches).toHaveLength(2)
-    expect(batches[1]![0]!.text).toBe("b")
+    expect(appended(batches[1]![0])).toBe("b")
   })
 
   test("flush with nothing pending does not apply", () => {
-    const batches: Delta[][] = []
+    const batches: AppliedPart[][] = []
     const queue = createDeltaQueue({ base_ms: 60, apply: (b) => batches.push(b) })
     queue.flush()
     expect(batches).toHaveLength(0)
@@ -125,6 +180,7 @@ describe("delta queue", () => {
     const clock = fakeClock()
     const queue = createDeltaQueue({ base_ms: 60, apply: () => {}, timer: clock.timer })
     for (let i = 0; i < 25; i++) queue.queue(delta("x"))
+    queue.queue_part(snapshot("part-1", "x"))
     expect(clock.scheduled()).toHaveLength(1)
   })
 })
