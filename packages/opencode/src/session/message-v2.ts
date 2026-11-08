@@ -129,23 +129,28 @@ function providerMeta(metadata: Record<string, any> | undefined) {
 }
 
 /**
- * Only reasoning that carries provider replay proof (an Anthropic signature, a
- * Gemini thought signature, or Bedrock redacted content) can be sent back.
- * Providers reached through the plain OpenAI-compatible protocol (DeepSeek and
- * friends) bill every replayed `reasoning_content` token again and do not need
- * it, so unsigned reasoning must stay out of the request.
+ * Only reasoning that carries provider replay proof can be sent back. Providers
+ * reached through the plain OpenAI-compatible protocol (DeepSeek and friends)
+ * bill every replayed `reasoning_content` token again and do not need it, so
+ * unsigned reasoning must stay out of the request. Proof lives under the
+ * provider's own metadata namespace (anthropic signature, google thought
+ * signature, bedrock signature, openai encrypted reasoning, openrouter details),
+ * so scan namespaces instead of hardcoding a provider list.
  */
 function isReplayableReasoning(metadata: Record<string, any> | undefined) {
   if (!metadata) return false
-  return (
-    metadata.signature != null ||
-    metadata.redactedContent != null ||
-    metadata.redactedData != null ||
-    metadata.anthropic?.signature != null ||
-    metadata.anthropic?.redactedData != null ||
-    metadata.google?.thoughtSignature != null ||
-    metadata.openrouter?.reasoning_details != null
-  )
+  const proof = (value: any) =>
+    value != null &&
+    typeof value === "object" &&
+    (value.signature != null ||
+      value.redactedContent != null ||
+      value.redactedData != null ||
+      value.thoughtSignature != null ||
+      value.reasoning_details != null ||
+      value.reasoningEncryptedContent != null ||
+      value.itemId != null)
+  if (proof(metadata)) return true
+  return Object.values(metadata).some(proof)
 }
 
 export const toModelMessagesEffect = Effect.fnUntraced(function* (

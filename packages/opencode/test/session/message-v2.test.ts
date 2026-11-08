@@ -150,6 +150,32 @@ describe("session.message-v2.toModelMessage", () => {
     expect(JSON.stringify(result)).toContain("SECRET_REASONING")
   })
 
+  test("keeps bedrock signed reasoning under every namespace", async () => {
+    for (const namespace of ["bedrock", "amazon-bedrock", "custom-bedrock"]) {
+      const result = await MessageV2.toModelMessages(
+        reasoningConversation({ [namespace]: { signature: "sig-1" } }),
+        compatModel,
+      )
+      expect(JSON.stringify(result)).toContain("SECRET_REASONING")
+    }
+  })
+
+  test("keeps openai responses and xai encrypted reasoning", async () => {
+    const result = await MessageV2.toModelMessages(
+      reasoningConversation({ openai: { itemId: "rs_1", reasoningEncryptedContent: "enc" } }),
+      compatModel,
+    )
+    expect(JSON.stringify(result)).toContain("SECRET_REASONING")
+  })
+
+  test("keeps google thought signatures", async () => {
+    const result = await MessageV2.toModelMessages(
+      reasoningConversation({ google: { thoughtSignature: "thought-1" } }),
+      compatModel,
+    )
+    expect(JSON.stringify(result)).toContain("SECRET_REASONING")
+  })
+
   test("filters out messages with no parts", async () => {
     const input: SessionV1.WithParts[] = [
       {
