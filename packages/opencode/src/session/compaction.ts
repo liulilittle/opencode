@@ -432,13 +432,17 @@ const layer = Layer.effect(
       let head = selected.head
       let msgs = structuredClone(head)
       yield* plugin.trigger("experimental.chat.messages.transform", { sessionID: input.sessionID, agent, compaction: true }, { messages: msgs })
-      let conversation = msgs.map(serialize).filter(Boolean).join("\n\n")
+      // 插件自定义 prompt 需要旧形态(历史序列化进单条消息);默认走结构化历史,
+      // 让压缩请求与主对话共享同一前缀,从而命中供应商的前缀缓存。
+      const custom = compacting.prompt
+      let conversation = custom ? msgs.map(serialize).filter(Boolean).join("\n\n") : ""
       const build = () =>
-        compacting.prompt ??
+        custom ??
         [
           buildPrompt({
             previousSummary,
-            context: [conversation],
+            context: [],
+            embedded: true,
           }),
           ...compacting.context,
           compactionAgent.prompt,
@@ -446,27 +450,31 @@ const layer = Layer.effect(
           .filter(Boolean)
           .join("\n\n")
       let nextPrompt = build()
+      let historyMessages = custom ? [] : yield* MessageV2.toModelMessagesEffect(msgs, model)
+      const estimateRequest = () =>
+        Token.estimate(nextPrompt) + (custom ? 0 : Token.estimate(JSON.stringify(historyMessages)))
       let dropped = 0
-      while (limit > 0 && Token.estimate(nextPrompt) > limit && head.length > 1) {
+      while (limit > 0 && estimateRequest() > limit && head.length > 1) {
         const all = turns(head, { hard: new Set(pins.hard ?? []), soft: new Set(pins.soft ?? []) })
         if (all.length <= 1) break
         if (all[0]?.hard) break
         head = head.slice(all[1]!.start)
         msgs = structuredClone(head)
         yield* plugin.trigger("experimental.chat.messages.transform", { sessionID: input.sessionID, agent, compaction: true }, { messages: msgs })
-        conversation = msgs.map(serialize).filter(Boolean).join("\n\n")
+        if (custom) conversation = msgs.map(serialize).filter(Boolean).join("\n\n")
         nextPrompt = build()
+        if (!custom) historyMessages = yield* MessageV2.toModelMessagesEffect(msgs, model)
         dropped++
       }
       if (dropped > 0) {
         yield* Effect.logInfo("compaction trimmed head to fit context", {
           "session.id": input.sessionID,
           dropped,
-          tokens: Token.estimate(nextPrompt),
+          tokens: estimateRequest(),
           limit,
         })
       }
-      if (limit > 0 && Token.estimate(nextPrompt) > limit) {
+      if (limit > 0 && estimateRequest() > limit) {
         const message = "Compaction request exceeds the model context limit after trimming history"
         yield* events.publish(Session.Event.Error, {
           sessionID: input.sessionID,
@@ -519,17 +527,15 @@ const layer = Layer.effect(
         tools: {},
         system,
         messages: [
+          ...historyMessages,
           {
             role: "user",
             content: [
               {
                 type: "text",
-                text: [
-                  nextPrompt,
-                  ...(compacting.prompt ? ["The following is the conversation history:", conversation] : []),
-                ]
-                  .filter(Boolean)
-                  .join("\n\n"),
+                text: custom
+                  ? [nextPrompt, "The following is the conversation history:", conversation].filter(Boolean).join("\n\n")
+                  : nextPrompt,
               },
             ],
           },

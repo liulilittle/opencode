@@ -157,20 +157,34 @@ const select = (
   }
 }
 
-export const buildPrompt = (input: { readonly previousSummary?: string; readonly context: readonly string[] }) => {
-  const conversation = `Here is the conversation so far:\n\n<conversation>\n${input.context.join("\n\n")}\n</conversation>`
+export const buildPrompt = (input: {
+  readonly previousSummary?: string
+  readonly context: readonly string[]
+  readonly embedded?: boolean
+}) => {
+  const conversation = input.embedded
+    ? ""
+    : `Here is the conversation so far:\n\n<conversation>\n${input.context.join("\n\n")}\n</conversation>`
   if (!input.previousSummary)
     return [
       conversation,
-      "Create a new anchored summary from the conversation history in the <conversation> tags above so another coding agent can continue the work.",
+      input.embedded
+        ? "Create a new anchored summary from the conversation history above so another coding agent can continue the work."
+        : "Create a new anchored summary from the conversation history in the <conversation> tags above so another coding agent can continue the work.",
       SUMMARY_TEMPLATE,
-    ].join("\n\n")
+    ]
+      .filter(Boolean)
+      .join("\n\n")
   return [
     conversation,
-    `Here is the summary of the conversation before the <conversation> above:\n\n<prior-summary>\n${input.previousSummary}\n</prior-summary>`,
+    input.embedded
+      ? `Here is the summary of the conversation before the messages above:\n\n<prior-summary>\n${input.previousSummary}\n</prior-summary>`
+      : `Here is the summary of the conversation before the <conversation> above:\n\n<prior-summary>\n${input.previousSummary}\n</prior-summary>`,
     SUMMARY_UPDATE_INSTRUCTIONS,
     SUMMARY_TEMPLATE,
-  ].join("\n\n")
+  ]
+    .filter(Boolean)
+    .join("\n\n")
 }
 
 export const make = (dependencies: Dependencies) => {
