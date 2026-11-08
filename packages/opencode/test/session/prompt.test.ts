@@ -765,6 +765,42 @@ it.instance("compaction started by an external summarize shares the main request
   }),
 )
 
+it.instance("compaction carries the structured-output system block like the main request", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const compaction = yield* SessionCompaction.Service
+    const chat = yield* sessions.create({
+      title: "Structured compaction",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    // json_schema 回合:主请求会把 STRUCTURED_OUTPUT_SYSTEM_PROMPT 追加进 system。
+    yield* sessions.updateMessage({
+      id: MessageID.ascending(),
+      role: "user",
+      sessionID: chat.id,
+      agent: "build",
+      model: ref,
+      format: new SessionV1.OutputFormatJsonSchema({
+        type: "json_schema",
+        schema: { type: "object", properties: {} },
+        retryCount: 0,
+      }),
+      time: { created: Date.now() },
+    } as unknown as SessionV1.User)
+    yield* compaction.create({ sessionID: chat.id, agent: "build", model: ref, auto: true })
+    yield* llm.text("summary")
+
+    yield* prompt.loop({ sessionID: chat.id })
+
+    const hits = yield* llm.hits
+    const body = JSON.stringify(hits[0]?.body)
+    // 压缩请求的 system 必须含同一个结构化输出块,否则 system 前缀与主请求不同。
+    expect(body).toContain("You MUST use the StructuredOutput tool")
+  }),
+)
+
 it.instance("loop stops provider overflow instead of auto-compacting when disabled", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig((url) => ({

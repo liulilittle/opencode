@@ -1191,6 +1191,15 @@ const layer = Layer.effect(
 
           if (task?.type === "compaction") {
             /**
+             * 结构化输出回合主请求会把 STRUCTURED_OUTPUT_SYSTEM_PROMPT 追加进 system
+             * (见下方 format 判定)。压缩分支在这之前返回,必须同源追加;否则压缩请求的
+             * system 前缀比主请求短一块 → provider 前缀缓存无法命中。
+             * lastUser 是压缩标记本身(无 format),格式须取自最近一条真实用户消息。
+             */
+            const prompted = msgs.findLast((m) => m.info.role === "user" && !m.parts.some((p) => p.type === "compaction"))
+            if ((prompted?.info.role === "user" ? (prompted.info.format ?? { type: "text" }) : { type: "text" }).type === "json_schema")
+              system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
+            /**
              * 插件经 `client.session.summarize` 触发压缩时会新起一个 runLoop,
              * 此时还没有主请求快照(lastResolvedTools 为 undefined)。必须现解析
              * 同一份 tools,否则压缩请求不带 tools → system+tools+history 前缀
@@ -1342,7 +1351,8 @@ const layer = Layer.effect(
 
             const modelMsgs = yield* MessageV2.toModelMessagesEffect(msgs, model)
             const format = lastUser.format ?? { type: "text" as const }
-            if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
+            // 结构化输出块已在 system 构造处按同一条件注入(压缩分支需要它),
+            // 此处禁止重复 push,否则同一请求会出现两份 → 前缀与历史不一致。
             const contextLimit = usable({ cfg: yield* config.get(), model, outputTokenMax: flags.outputTokenMax })
             const requestTokens = estimateRequestTokens({ system, messages: modelMsgs, tools })
             if (contextLimit > 0 && requestTokens > contextLimit) {
