@@ -431,7 +431,7 @@ const layer = Layer.effect(
       const limit = usable({ cfg, model, outputTokenMax: flags.outputTokenMax })
       let head = selected.head
       let msgs = structuredClone(head)
-      yield* plugin.trigger("experimental.chat.messages.transform", { sessionID: input.sessionID, agent }, { messages: msgs })
+      yield* plugin.trigger("experimental.chat.messages.transform", { sessionID: input.sessionID, agent, compaction: true }, { messages: msgs })
       let conversation = msgs.map(serialize).filter(Boolean).join("\n\n")
       const build = () =>
         compacting.prompt ??
@@ -453,7 +453,7 @@ const layer = Layer.effect(
         if (all[0]?.hard) break
         head = head.slice(all[1]!.start)
         msgs = structuredClone(head)
-        yield* plugin.trigger("experimental.chat.messages.transform", { sessionID: input.sessionID, agent }, { messages: msgs })
+        yield* plugin.trigger("experimental.chat.messages.transform", { sessionID: input.sessionID, agent, compaction: true }, { messages: msgs })
         conversation = msgs.map(serialize).filter(Boolean).join("\n\n")
         nextPrompt = build()
         dropped++
