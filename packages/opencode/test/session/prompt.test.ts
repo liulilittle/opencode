@@ -801,6 +801,31 @@ it.instance("compaction carries the structured-output system block like the main
   }),
 )
 
+it.instance("compaction reuses the real user message so per-request overrides survive", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const compaction = yield* SessionCompaction.Service
+    const chat = yield* sessions.create({
+      title: "User overrides",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    // 该用户消息带 per-request system 覆盖。prepare 会把 input.user.system 拼进 system,
+    // 压缩若改用压缩标记消息(无 system)则少这一块 → system 前缀与主请求不同。
+    const original = yield* user(chat.id, "hello")
+    yield* sessions.updateMessage({ ...original, system: "PER_REQUEST_SYSTEM_OVERRIDE" })
+    yield* compaction.create({ sessionID: chat.id, agent: "build", model: ref, auto: true })
+    yield* llm.text("summary")
+
+    yield* prompt.loop({ sessionID: chat.id })
+
+    const hits = yield* llm.hits
+    const body = JSON.stringify(hits[0]?.body)
+    expect(body).toContain("PER_REQUEST_SYSTEM_OVERRIDE")
+  }),
+)
+
 it.instance("loop stops provider overflow instead of auto-compacting when disabled", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig((url) => ({

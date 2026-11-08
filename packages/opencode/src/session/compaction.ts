@@ -203,8 +203,10 @@ export interface Interface {
       * `Permission.merge(agent.permission, permission)` 过滤工具集,缺了它压缩请求
       * 保留的工具与主请求不同 → tools 前缀不一致,共享前缀失效。
       */
-     permission?: PermissionV1.Ruleset
-   }) => Effect.Effect<"continue" | "stop">
+      permission?: PermissionV1.Ruleset
+      /** 见 process 实现:被压缩的真实用户消息(带 per-request 覆盖)。 */
+      requestUser?: SessionV1.User
+    }) => Effect.Effect<"continue" | "stop">
   readonly create: (input: {
     sessionID: SessionID
     agent: string
@@ -382,6 +384,13 @@ const layer = Layer.effect(
       tools?: Record<string, Tool>
       /** 见 Interface.process:同一份 session 权限才能过滤出同一工具集。 */
       permission?: PermissionV1.Ruleset
+      /**
+       * 被压缩的真实用户消息(携带 per-request 的 system/tools/format 覆盖)。
+       * `parentID` 指向压缩标记消息,而 `LLMRequestPrep.prepare` 会把
+       * `input.user.system` 拼进 system、用 `input.user.tools` 过滤工具集;
+       * 用标记建档会丢掉这两个字段 → system/tools 前缀与主请求不一致。
+       */
+      requestUser?: SessionV1.User
     }) {
       const parent = input.messages.findLast((m) => m.info.id === input.parentID)
       if (!parent || parent.info.role !== "user") {
@@ -565,7 +574,7 @@ const layer = Layer.effect(
         model,
       })
       const result = yield* processor.process({
-        user: userMessage,
+        user: input.requestUser ?? userMessage,
         agent,
         sessionID: input.sessionID,
         permission: input.permission,

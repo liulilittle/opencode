@@ -1242,6 +1242,12 @@ const layer = Layer.effect(
                * 缺了它压缩请求保留的工具与主请求不同 → tools 前缀不一致。
                */
               permission: session.permission,
+              /**
+               * 必须传被压缩的真实用户消息而非压缩标记:`LLMRequestPrep.prepare`
+               * 会把 `user.system` 拼进 system、用 `user.tools` 过滤工具集。
+               * 传标记消息会丢掉这两个 per-request 覆盖 → 前缀与主请求不同。
+               */
+              requestUser: prompted?.info.role === "user" ? prompted.info : undefined,
             })
             if (result === "stop") break
             continue
