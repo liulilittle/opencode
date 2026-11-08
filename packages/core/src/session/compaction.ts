@@ -161,10 +161,18 @@ export const buildPrompt = (input: {
   readonly previousSummary?: string
   readonly context: readonly string[]
   readonly embedded?: boolean
+  readonly priorInHistory?: boolean
 }) => {
   const conversation = input.embedded
     ? ""
     : `Here is the conversation so far:\n\n<conversation>\n${input.context.join("\n\n")}\n</conversation>`
+  if (input.embedded && input.priorInHistory)
+    return [
+      "The messages above begin with an anchored summary of earlier work. Construct a new anchored summary that combines that prior summary with the later messages. The prior summary is discarded after this: carry forward objectives, constraints, decisions and parallel workstreams even when the later messages do not mention them. Where they conflict, the later messages win. Move completed work to Completed and update Objective and Next Move.",
+      SUMMARY_TEMPLATE,
+    ]
+      .filter(Boolean)
+      .join("\n\n")
   if (!input.previousSummary)
     return [
       conversation,

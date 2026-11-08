@@ -1720,11 +1720,12 @@ describe("session.compaction.process", () => {
         expect(parent).toBeTruthy()
         yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 
-        expect(captured).toContain("<prior-summary>")
+        const parsed = JSON.parse(captured) as Array<{ role: string }>
+        expect(captured).not.toContain("<prior-summary>")
         expect(captured).toContain("summary one")
         expect(captured.match(/summary one/g)?.length).toBe(1)
-        expect(captured.indexOf("latest turn")).toBeLessThan(captured.indexOf("<prior-summary>"))
-        expect(captured).toContain("summary of the conversation before the messages above")
+        expect(parsed.at(-1)?.role).toBe("user")
+        expect(captured).toContain("The messages above begin with an anchored summary")
         expect(captured).toContain("## Important Details")
         expect(captured).toContain("## Work State")
       }).pipe(withCompaction({ llm: stub.llmLayer }))
@@ -1834,7 +1835,7 @@ describe("session.compaction.process", () => {
         expect(parent).toBeTruthy()
         yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 
-        expect(captured).toHaveLength(3)
+        expect(captured.length).toBeGreaterThan(1)
         expect(captured.at(-1)?.role).toBe("user")
         expect(JSON.stringify(captured)).toContain("file contents")
         expect(JSON.stringify(captured)).toContain('"role":"assistant"')

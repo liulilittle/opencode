@@ -429,7 +429,10 @@ const layer = Layer.effect(
         { context: [], prompt: undefined },
       )
       const limit = usable({ cfg, model, outputTokenMax: flags.outputTokenMax })
-      let head = selected.head
+      const tailIndex = selected.tail_start_id
+        ? history.findIndex((msg) => msg.info.id === selected.tail_start_id)
+        : -1
+      let head = tailIndex >= 0 ? history.slice(0, tailIndex) : history
       let msgs = structuredClone(head)
       yield* plugin.trigger("experimental.chat.messages.transform", { sessionID: input.sessionID, agent, compaction: true }, { messages: msgs })
       // 插件自定义 prompt 需要旧形态(历史序列化进单条消息);默认走结构化历史,
@@ -440,9 +443,9 @@ const layer = Layer.effect(
         custom ??
         [
           buildPrompt({
-            previousSummary,
             context: [],
             embedded: true,
+            priorInHistory: !!previousSummary,
           }),
           ...compacting.context,
           compactionAgent.prompt,
