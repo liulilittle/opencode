@@ -25,6 +25,7 @@ import { useProject } from "./project"
 import { useEvent } from "./event"
 import { useSDK } from "./sdk"
 import { useTuiStartup } from "./runtime"
+import { createDeltaQueue, type Delta } from "./delta-queue"
 import { createSimpleContext } from "./helper"
 import { useExit } from "./exit"
 import { useArgs } from "./args"
@@ -66,6 +67,13 @@ export const {
   init: () => {
     const startup = useTuiStartup()
     const kv = useKV()
+    const delta_batch_ms = (() => {
+      const env = Number(process.env.OPENCODE_TUI_DELTA_MS)
+      if (Number.isFinite(env) && env >= 16 && env <= 1000) return env
+      const saved = Number(kv.get("tui_delta_batch_ms", 60))
+      if (Number.isFinite(saved) && saved >= 16 && saved <= 1000) return saved
+      return 60
+    })()
     const permission = usePermission()
     const [store, setStore] = createStore<{
       status: "loading" | "partial" | "complete"
@@ -172,6 +180,32 @@ export const {
         .list({ start: Date.now() - 30 * 24 * 60 * 60 * 1000, ...sessionListQuery() })
         .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
     }
+
+    type PendingDelta = Delta
+    const delta_queue = createDeltaQueue({
+      base_ms: delta_batch_ms,
+      apply: (batch) => {
+        for (const d of batch) {
+          const parts = store.part[d.messageID]
+          if (!parts) continue
+          const result = search(parts, d.partID, (part) => part.id)
+          if (!result.found) continue
+          touchPart(d.sessionID, d.partID)
+          setStore(
+            "part",
+            d.messageID,
+            produce((draft) => {
+              const part = draft[result.index]
+              const field = d.field as keyof typeof part
+              const existing = part[field] as string | undefined
+              ;(part[field] as string) = (existing ?? "") + d.text
+            }),
+          )
+        }
+      },
+    })
+    const flush_pending_deltas = (): void => delta_queue.flush()
+    const queue_delta = (d: PendingDelta): void => delta_queue.queue(d)
 
     event.subscribe((event, { directory, workspace }) => {
       switch (event.type) {
@@ -319,6 +353,7 @@ export const {
         }
 
         case "message.updated": {
+          flush_pending_deltas()
           touchMessage(event.properties.info.sessionID, event.properties.info.id)
           const messages = store.message[event.properties.info.sessionID]
           if (!messages) {
@@ -359,6 +394,7 @@ export const {
           break
         }
         case "message.removed": {
+          flush_pending_deltas()
           touchMessage(event.properties.sessionID, event.properties.messageID)
           const messages = store.message[event.properties.sessionID]
           const index = messages.findIndex((message) => message.id === event.properties.messageID)
@@ -374,6 +410,7 @@ export const {
           break
         }
         case "message.part.updated": {
+          flush_pending_deltas()
           touchPart(event.properties.part.sessionID, event.properties.part.id)
           const parts = store.part[event.properties.part.messageID]
           if (!parts) {
@@ -400,21 +437,18 @@ export const {
           if (!parts) break
           const result = search(parts, event.properties.partID, (part) => part.id)
           if (!result.found) break
-          touchPart(event.properties.sessionID, event.properties.partID)
-          setStore(
-            "part",
-            event.properties.messageID,
-            produce((draft) => {
-              const part = draft[result.index]
-              const field = event.properties.field as keyof typeof part
-              const existing = part[field] as string | undefined
-              ;(part[field] as string) = (existing ?? "") + event.properties.delta
-            }),
-          )
+          queue_delta({
+            sessionID: event.properties.sessionID,
+            messageID: event.properties.messageID,
+            partID: event.properties.partID,
+            field: event.properties.field,
+            text: event.properties.delta,
+          })
           break
         }
 
         case "message.part.removed": {
+          flush_pending_deltas()
           touchPart(event.properties.sessionID, event.properties.partID)
           const parts = store.part[event.properties.messageID]
           const result = search(parts, event.properties.partID, (part) => part.id)
