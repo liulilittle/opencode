@@ -63,6 +63,30 @@ function unquoteGitPath(input: string) {
   return Buffer.from(bytes).toString()
 }
 
+const MAX_DIFF_PATCH = 64 * 1024
+const MAX_DIFF_TOTAL = 512 * 1024
+
+/** 单条补丁 64KB、总补丁 512KB 封顶:summary.diffs 会随 message.updated 进入事件表
+ *  (每条事件整包持久化并推给客户端),未封顶时一次可产生 MB 级事件,拖慢流式与存储。 */
+export function capDiffs(diffs: Snapshot.FileDiff[]): Snapshot.FileDiff[] {
+  let total = 0
+  const out: Snapshot.FileDiff[] = []
+  for (const item of diffs) {
+    if (total >= MAX_DIFF_TOTAL) break
+    const patch = item.patch
+    const room = Math.min(MAX_DIFF_PATCH, MAX_DIFF_TOTAL - total)
+    if (patch === undefined || patch.length <= room) {
+      total += patch?.length ?? 0
+      out.push(item)
+      continue
+    }
+    const cut = patch.slice(0, room) + "\n…(diff truncated)"
+    total += cut.length
+    out.push({ ...item, patch: cut })
+  }
+  return out
+}
+
 export interface Interface {
   readonly summarize: (input: { sessionID: SessionID; messageID: MessageID }) => Effect.Effect<void>
   readonly diff: (input: { sessionID: SessionID; messageID?: MessageID }) => Effect.Effect<Snapshot.FileDiff[]>
@@ -122,7 +146,7 @@ const layer = Layer.effect(
       const target = messages.find((m) => m.info.id === input.messageID)
       if (!target || target.info.role !== "user") return
       const msgDiffs = yield* computeDiff({ messages })
-      target.info.summary = { ...target.info.summary, diffs: msgDiffs }
+      target.info.summary = { ...target.info.summary, diffs: capDiffs(msgDiffs) }
       yield* sessions.updateMessage(target.info)
     })
 
