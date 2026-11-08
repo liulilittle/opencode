@@ -176,6 +176,9 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     })
 
     const remove = Effect.fn("SessionHttpApi.remove")(function* (ctx: { params: { sessionID: SessionID } }) {
+      // 先中止在途回合并等待其落定:否则删除会话/消息行后,处理器的迟到 part 写入
+      // 会触发 FOREIGN KEY constraint failed,并把错误回灌给用户。
+      yield* runState.cancel(ctx.params.sessionID).pipe(Effect.catchCause(() => Effect.void))
       yield* SessionError.mapStorageNotFound(session.remove(ctx.params.sessionID))
       return true
     })
