@@ -1098,6 +1098,12 @@ const layer = Layer.effect(
         let structured: unknown
         let step = 0
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
+        /**
+         * 上一次主请求解析出的工具集。压缩请求复用它,使 system + tools + history
+         * 前缀与主请求完全一致,才能命中供应商前缀缓存(压缩带 toolChoice="none",
+         * 不会真的调用工具)。
+         */
+        let lastResolvedTools: Record<string, AITool> | undefined
 
         while (true) {
           yield* status.set(sessionID, { type: "busy" })
@@ -1191,6 +1197,7 @@ const layer = Layer.effect(
               auto: task.auto,
               overflow: task.overflow,
               system,
+              tools: lastResolvedTools,
             })
             if (result === "stop") break
             continue
@@ -1269,6 +1276,7 @@ const layer = Layer.effect(
               Effect.provideService(Truncate.Service, truncate),
               Effect.provideService(RuntimeFlags.Service, flags),
             )
+            lastResolvedTools = tools
 
             if (lastUser.format?.type === "json_schema") {
               tools["StructuredOutput"] = createStructuredOutputTool({

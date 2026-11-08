@@ -13,6 +13,7 @@ import { Config } from "@/config/config"
 import { NotFoundError } from "@/storage/storage"
 
 import { Effect, Layer, Context } from "effect"
+import type { Tool } from "ai"
 import { InstanceState } from "@/effect/instance-state"
 import { isOverflow as overflow, usable } from "./overflow"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
@@ -177,14 +178,15 @@ export interface Interface {
     model: Provider.Model
   }) => Effect.Effect<boolean>
   readonly prune: (input: { sessionID: SessionID }) => Effect.Effect<void>
-  readonly process: (input: {
-    parentID: MessageID
-    messages: SessionV1.WithParts[]
-    sessionID: SessionID
-    auto: boolean
-    overflow?: boolean
-    system?: string[]
-  }) => Effect.Effect<"continue" | "stop">
+   readonly process: (input: {
+     parentID: MessageID
+     messages: SessionV1.WithParts[]
+     sessionID: SessionID
+     auto: boolean
+     overflow?: boolean
+     system?: string[]
+     tools?: Record<string, Tool>
+   }) => Effect.Effect<"continue" | "stop">
   readonly create: (input: {
     sessionID: SessionID
     agent: string
@@ -354,6 +356,12 @@ const layer = Layer.effect(
       auto: boolean
       overflow?: boolean
       system?: string[]
+      /**
+       * 与主对话相同的工具集。压缩请求携带同一份 tools,使
+       * system + tools + history 前缀与主请求一致,从而命中供应商前缀缓存;
+       * 同时 toolChoice="none" 保证压缩模型不会调用工具。
+       */
+      tools?: Record<string, Tool>
     }) {
       const parent = input.messages.findLast((m) => m.info.id === input.parentID)
       if (!parent || parent.info.role !== "user") {
@@ -527,7 +535,8 @@ const layer = Layer.effect(
         user: userMessage,
         agent,
         sessionID: input.sessionID,
-        tools: {},
+        tools: input.tools ?? {},
+        ...(input.tools ? { toolChoice: "none" as const } : {}),
         system,
         messages: [
           ...historyMessages,

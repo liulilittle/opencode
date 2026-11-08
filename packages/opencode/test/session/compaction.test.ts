@@ -1734,6 +1734,43 @@ describe("session.compaction.process", () => {
   )
 
   itCompaction.instance(
+    "sends the same tool set as the main request with toolChoice none",
+    () => {
+      const stub = llm()
+      let captured: LLM.StreamInput | undefined
+      stub.push(
+        reply("summary", (input) => {
+          captured = input
+        }),
+      )
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "hello")
+        yield* createCompactionMarker(session.id)
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        const tools = { bash: { description: "run bash" } } as unknown as Record<string, never>
+        yield* SessionCompaction.use.process({
+          parentID: parent!,
+          messages: msgs,
+          sessionID: session.id,
+          auto: false,
+          tools,
+        })
+
+        expect(captured).toBeDefined()
+        // 语音:压缩请求必须携带与主请求相同的工具集(共享前缀),且禁止调用工具。
+        expect(captured!.tools).toBe(tools)
+        expect(captured!.toolChoice).toBe("none")
+      }).pipe(withCompaction({ llm: stub.llmLayer }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
     "keeps plugin context outside the serialized conversation",
     () => {
       const stub = llm()
