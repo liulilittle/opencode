@@ -150,6 +150,31 @@ describe("session.message-v2.toModelMessage", () => {
     expect(JSON.stringify(result)).toContain("SECRET_REASONING")
   })
 
+  test("cross-model switch preserves reasoning as visible text (for continuity)", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+    const input: SessionV1.WithParts[] = [
+      { info: userInfo(userID), parts: [{ ...basePart(userID, "u1"), type: "text", text: "go" }] },
+      {
+        info: assistantInfo(assistantID, userID, undefined, { providerID: "other", modelID: "other" }),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "reasoning",
+            text: "CROSS_MODEL_REASONING",
+            metadata: {},
+            time: { start: 0 },
+          },
+          { ...basePart(assistantID, "a2"), type: "text", text: "answer" },
+        ],
+      },
+    ]
+    // 跨模型时 reasonings 转可见文本，新模型知道之前推理；元数据不带。
+    const result = await MessageV2.toModelMessages(input, model)
+    expect(JSON.stringify(result)).toContain("CROSS_MODEL_REASONING")
+    expect(JSON.stringify(result)).not.toContain("providerMetadata")
+  })
+
   test("keeps bedrock signed reasoning under every namespace", async () => {
     for (const namespace of ["bedrock", "amazon-bedrock", "custom-bedrock"]) {
       const result = await MessageV2.toModelMessages(
@@ -852,6 +877,35 @@ describe("session.message-v2.toModelMessage", () => {
         ],
       },
     ])
+  })
+
+  test("drops reasoning entirely when the assistant model differs", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+    const input: SessionV1.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [{ ...basePart(userID, "u1"), type: "text", text: "go" }] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID, undefined, { providerID: "other", modelID: "other" }),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "reasoning",
+            text: "KEPT_REASONING_TEXT",
+            metadata: { anthropic: { signature: "sig-1" } },
+            time: { start: 0 },
+          },
+          { ...basePart(assistantID, "a2"), type: "text", text: "answer" },
+        ] as SessionV1.Part[],
+      },
+    ]
+    const result = await MessageV2.toModelMessages(input, model)
+    // 跨模型时 reasoning 转可见文本(让新模型知道先前推理),签名元数据不带。
+    expect(JSON.stringify(result)).toContain("KEPT_REASONING_TEXT")
+    expect(JSON.stringify(result)).not.toContain("sig-1")
+    expect(JSON.stringify(result)).toContain("answer")
   })
 
   test("omits provider metadata when assistant model differs", async () => {
