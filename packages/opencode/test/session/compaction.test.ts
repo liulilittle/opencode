@@ -1931,14 +1931,19 @@ describe("session.compaction.process", () => {
 })
 
 describe("util.token.estimate", () => {
-  test("estimates tokens from text (4 chars per token)", () => {
-    const text = "x".repeat(4000)
+  test("estimates ASCII text at ~3.2 chars per token", () => {
+    const text = "x".repeat(3200)
     expect(Token.estimate(text)).toBe(1000)
   })
 
-  test("estimates tokens from larger text", () => {
-    const text = "y".repeat(20_000)
-    expect(Token.estimate(text)).toBe(5000)
+  test("estimates CJK text at ~1.6 chars per token", () => {
+    const text = "中".repeat(1600)
+    expect(Token.estimate(text)).toBe(1000)
+  })
+
+  test("mixed text splits both weights", () => {
+    const mixed = "a".repeat(1600) + "中".repeat(800)
+    expect(Token.estimate(mixed)).toBe(1000)
   })
 
   test("returns 0 for empty string", () => {
