@@ -263,7 +263,12 @@ const layer = Layer.effect(
       model: Provider.Model
     }) {
       const msgs = yield* MessageV2.toModelMessagesEffect(input.messages, input.model)
-      return Token.estimate(JSON.stringify(msgs))
+      /**
+       * 必须走 estimateRequestTokens:它把二进制/data URL 换成占位符。
+       * 直接用 JSON.stringify + Token.estimate 会把 base64 附件当成几百万 token,
+       * 使带图的 turn 被误判超预算而整体丢掉,保留尾部也随之被错切。
+       */
+      return estimateRequestTokens({ messages: msgs })
     })
 
     const select = Effect.fn("SessionCompaction.select")(function* (input: {

@@ -995,6 +995,54 @@ describe("session.compaction.process", () => {
   )
 
   itCompaction.instance(
+    "estimates media turns by placeholder so huge attachments do not evict the tail",
+    () => {
+      const stub = llm()
+      let captured = ""
+      stub.push(reply("summary", (input) => (captured = JSON.stringify(input.messages))))
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "first")
+        // 一个体量巨大的 base64 附件:若估算按原始字符计,它会独占预算并把
+        // 后续 turn 全部挤出保留尾部;按占位符计则应视为很小。
+        const keep = yield* createUserMessage(session.id, "with media")
+        yield* ssn.updatePart({
+          id: PartID.ascending(),
+          messageID: keep.id,
+          sessionID: session.id,
+          type: "file",
+          mime: "image/png",
+          url: "data:image/png;base64," + "A".repeat(4_000_000),
+        } as never)
+        yield* createUserMessage(session.id, "tiny")
+        yield* createSummaryCompaction(session.id)
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({
+          parentID: parent!,
+          messages: msgs,
+          sessionID: session.id,
+          auto: false,
+        })
+
+        const part = yield* readCompactionPart(session.id)
+        expect(part?.type).toBe("compaction")
+        // 4MB base64 若按原始字符计 token,含 media 的 turn 会独占预算、被挤出保留尾部,
+        // 边界就会落在它之后的 turn。按占位符计则整段尾部都装得下,边界不得越过 keep。
+        const boundaryIndex = part?.tail_start_id
+          ? (yield* ssn.messages({ sessionID: session.id })).findIndex((m) => m.info.id === part.tail_start_id)
+          : -1
+        const keepIndex = (yield* ssn.messages({ sessionID: session.id })).findIndex((m) => m.info.id === keep.id)
+        expect(boundaryIndex === -1 || boundaryIndex <= keepIndex).toBe(true)
+      }).pipe(withCompaction({ llm: stub.llmLayer, config: cfg({ preserve_recent_tokens: 3_000 }) }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
     "shrinks retained tail to fit preserve token budget",
     Effect.gen(function* () {
       const ssn = yield* SessionNs.Service
@@ -1057,7 +1105,7 @@ describe("session.compaction.process", () => {
         const ssn = yield* SessionNs.Service
         const session = yield* ssn.create({})
         yield* createUserMessage(session.id, "older")
-        const recent = yield* createUserMessage(session.id, "recent image turn")
+        const recent = yield* createUserMessage(session.id, "recent oversized turn")
         yield* ssn.updatePart({
           id: PartID.ascending(),
           messageID: recent.id,
@@ -1066,6 +1114,14 @@ describe("session.compaction.process", () => {
           mime: "image/png",
           filename: "big.png",
           url: `data:image/png;base64,${"a".repeat(4_000)}`,
+        })
+        // 媒体按占位符计,故用真实文本把该轮推过保留预算。
+        yield* ssn.updatePart({
+          id: PartID.ascending(),
+          messageID: recent.id,
+          sessionID: session.id,
+          type: "text",
+          text: "y".repeat(4_000),
         })
         yield* createSummaryCompaction(session.id)
 
@@ -1077,7 +1133,7 @@ describe("session.compaction.process", () => {
         const part = yield* readCompactionPart(session.id)
         expect(part?.type).toBe("compaction")
         expect(part?.tail_start_id).toBeUndefined()
-        expect(captured).toContain("recent image turn")
+        expect(captured).toContain("recent oversized turn")
         expect(captured).toContain("big.png")
       }).pipe(withCompaction({ llm: stub.llmLayer, config: cfg({ tail_turns: 1, preserve_recent_tokens: 100 }) }))
     },
