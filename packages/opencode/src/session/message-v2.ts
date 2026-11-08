@@ -128,6 +128,26 @@ function providerMeta(metadata: Record<string, any> | undefined) {
   return Object.keys(rest).length > 0 ? rest : undefined
 }
 
+/**
+ * Only reasoning that carries provider replay proof (an Anthropic signature, a
+ * Gemini thought signature, or Bedrock redacted content) can be sent back.
+ * Providers reached through the plain OpenAI-compatible protocol (DeepSeek and
+ * friends) bill every replayed `reasoning_content` token again and do not need
+ * it, so unsigned reasoning must stay out of the request.
+ */
+function isReplayableReasoning(metadata: Record<string, any> | undefined) {
+  if (!metadata) return false
+  return (
+    metadata.signature != null ||
+    metadata.redactedContent != null ||
+    metadata.redactedData != null ||
+    metadata.anthropic?.signature != null ||
+    metadata.anthropic?.redactedData != null ||
+    metadata.google?.thoughtSignature != null ||
+    metadata.openrouter?.reasoning_details != null
+  )
+}
+
 export const toModelMessagesEffect = Effect.fnUntraced(function* (
   input: WithParts[],
   model: Provider.Model,
@@ -381,6 +401,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
               })
             continue
           }
+          if (!isReplayableReasoning(part.metadata)) continue
           assistantMessage.parts.push({
             type: "reasoning",
             text: part.text,

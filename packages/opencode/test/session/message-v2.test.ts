@@ -113,6 +113,43 @@ function basePart(messageID: string, id: string) {
 }
 
 describe("session.message-v2.toModelMessage", () => {
+  const compatModel: Provider.Model = {
+    ...model,
+    api: { ...model.api, npm: "@ai-sdk/openai-compatible" },
+  }
+
+  function reasoningConversation(metadata?: Record<string, unknown>): SessionV1.WithParts[] {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+    return [
+      {
+        info: userInfo(userID),
+        parts: [{ ...basePart(userID, "p1"), type: "text", text: "hello" }] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          { ...basePart(assistantID, "p2"), type: "reasoning", text: "SECRET_REASONING", metadata },
+          { ...basePart(assistantID, "p3"), type: "text", text: "answer" },
+        ] as SessionV1.Part[],
+      },
+    ]
+  }
+
+  test("drops unsigned reasoning from openai-compatible requests", async () => {
+    const result = await MessageV2.toModelMessages(reasoningConversation(), compatModel)
+    expect(JSON.stringify(result)).not.toContain("SECRET_REASONING")
+    expect(JSON.stringify(result)).toContain("answer")
+  })
+
+  test("keeps signed reasoning so providers that require replay still work", async () => {
+    const result = await MessageV2.toModelMessages(
+      reasoningConversation({ anthropic: { signature: "sig-1" } }),
+      compatModel,
+    )
+    expect(JSON.stringify(result)).toContain("SECRET_REASONING")
+  })
+
   test("filters out messages with no parts", async () => {
     const input: SessionV1.WithParts[] = [
       {
@@ -1223,10 +1260,7 @@ describe("session.message-v2.toModelMessage", () => {
     expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([
       {
         role: "assistant",
-        content: [
-          { type: "reasoning", text: "thinking", providerOptions: undefined },
-          { type: "text", text: "partial answer" },
-        ],
+        content: [{ type: "text", text: "partial answer" }],
       },
     ])
   })
