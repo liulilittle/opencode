@@ -8,7 +8,7 @@ import { Cause, Deferred, Effect, Exit, Fiber, Layer, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { Config } from "@/config/config"
 import { LLM } from "../../src/session/llm"
-import { SessionCompaction } from "../../src/session/compaction"
+import { SessionCompaction, sharesCompactionPrefix } from "../../src/session/compaction"
 import { Token } from "@/util/token"
 import { Plugin } from "../../src/plugin"
 import { provideTmpdirInstance, TestInstance } from "../fixture/fixture"
@@ -1445,7 +1445,9 @@ describe("session.compaction.process", () => {
         expect(Exit.isFailure(exit)).toBe(true)
         if (Exit.isFailure(exit)) {
           expect(Cause.hasInterrupts(exit.cause)).toBe(true)
-          expect(Date.now() - start).toBeLessThan(250)
+          // 不变量是中断不被 provider 的 10s retry-after 退避阻塞;绝对毫秒阈值会随
+          // 并行测试负载抖动(实测 0.3s-1.7s),用退避时长的保守分数作上界。
+          expect(Date.now() - start).toBeLessThan(5_000)
         }
       }).pipe(withCompaction({ llm: stub.llmLayer }))
     },
@@ -1474,7 +1476,7 @@ describe("session.compaction.process", () => {
 
           yield* Deferred.await(ready).pipe(Effect.timeout("1 second"))
           yield* Fiber.interrupt(fiber)
-          const exit = yield* Fiber.await(fiber).pipe(Effect.timeout("250 millis"))
+        const exit = yield* Fiber.await(fiber).pipe(Effect.timeout("5 seconds"))
           const all = yield* ssn.messages({ sessionID: session.id })
 
           expect(Exit.isFailure(exit)).toBe(true)
@@ -1762,13 +1764,24 @@ describe("session.compaction.process", () => {
         })
 
         expect(captured).toBeDefined()
-        // 语音:压缩请求必须携带与主请求相同的工具集(共享前缀),且禁止调用工具。
+        // 语义:压缩请求必须携带与主请求相同的工具集(共享前缀),且禁止调用工具。
         expect(captured!.tools).toBe(tools)
         expect(captured!.toolChoice).toBe("none")
       }).pipe(withCompaction({ llm: stub.llmLayer }))
     },
     { git: true },
   )
+
+  test("shares the parent tool set only when the compaction model matches", () => {
+    const parent = { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test-model") }
+    const base = createModel({ context: 1, output: 1 })
+    // 同 provider 同 model 才共享前缀
+    expect(sharesCompactionPrefix(parent, base)).toBe(true)
+    // 不同模型 = 不同缓存域,工具集不可复用
+    expect(sharesCompactionPrefix(parent, { ...base, id: ModelV2.ID.make("other") })).toBe(false)
+    // 不同 provider 亦不可复用
+    expect(sharesCompactionPrefix(parent, { ...base, providerID: ProviderV2.ID.make("other") })).toBe(false)
+  })
 
   itCompaction.instance(
     "keeps plugin context outside the serialized conversation",

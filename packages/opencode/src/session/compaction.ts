@@ -26,6 +26,17 @@ import { SessionCompactionEvent } from "@opencode-ai/schema/session-compaction-e
 
 export const Event = SessionCompactionEvent
 
+/**
+ * 压缩请求只有在模型与父对话完全一致时才共享父请求的 tools:
+ * 不同模型 = 不同前缀缓存域,且工具集可能不适用,必须回退为空集。
+ */
+export function sharesCompactionPrefix(
+  parent: { providerID: ProviderV2.ID; modelID: ModelV2.ID },
+  compaction: Pick<Provider.Model, "providerID" | "id">,
+) {
+  return parent.providerID === compaction.providerID && parent.modelID === compaction.id
+}
+
 export const PRUNE_MINIMUM = 20_000
 export const PRUNE_PROTECT = 40_000
 const TOOL_OUTPUT_MAX_CHARS = 2_000
@@ -535,8 +546,8 @@ const layer = Layer.effect(
         user: userMessage,
         agent,
         sessionID: input.sessionID,
-        tools: input.tools ?? {},
-        ...(input.tools ? { toolChoice: "none" as const } : {}),
+        tools: sharesCompactionPrefix(userMessage.model, model) ? (input.tools ?? {}) : {},
+        ...(sharesCompactionPrefix(userMessage.model, model) && input.tools ? { toolChoice: "none" as const } : {}),
         system,
         messages: [
           ...historyMessages,

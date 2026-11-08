@@ -1276,7 +1276,6 @@ const layer = Layer.effect(
               Effect.provideService(Truncate.Service, truncate),
               Effect.provideService(RuntimeFlags.Service, flags),
             )
-            lastResolvedTools = tools
 
             if (lastUser.format?.type === "json_schema") {
               tools["StructuredOutput"] = createStructuredOutputTool({
@@ -1286,6 +1285,8 @@ const layer = Layer.effect(
                 },
               })
             }
+            /** 必须在本请求的全部工具注入完成后快照,压缩请求才能与主请求逐字节一致。 */
+            lastResolvedTools = tools
 
             if (step === 1)
               yield* summary.summarize({ sessionID, messageID: lastUser.id }).pipe(Effect.ignore, Effect.forkIn(scope))
