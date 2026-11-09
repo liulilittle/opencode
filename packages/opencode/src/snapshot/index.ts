@@ -620,8 +620,11 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                   }
                   const out = batch.stdout
 
+                  // 批量读取失败不能静默:调用方仍会退回逐文件 git show 拿到正确结果,
+                  // 但退化原因(头截断/头格式错/内容截断/尾部多余)和出错的 head 只在这里可见。
+                  // 没有这条日志,现场表现是"快照 diff 突然慢 N 倍"而日志里什么都没有。
                   const fail = (msg: string, extra?: Record<string, string>) => {
-                    return undefined
+                    return Effect.logInfo(msg, extra ?? {})
                   }
 
                   const map = new Map<string, { before: string; after: string }>()
@@ -631,7 +634,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                     let end = i
                     while (end < out.length && out[end] !== 10) end += 1
                     if (end >= out.length) {
-                      return fail(
+                      return yield* fail(
                         "git cat-file --batch returned a truncated header during snapshot diff, falling back to per-file git show",
                       )
                     }
@@ -646,7 +649,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
 
                     const match = head.match(/^[0-9a-f]+ blob (\d+)$/)
                     if (!match) {
-                      return fail(
+                      return yield* fail(
                         "git cat-file --batch returned an unexpected header during snapshot diff, falling back to per-file git show",
                         { head },
                       )
@@ -654,7 +657,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
 
                     const size = Number(match[1])
                     if (!Number.isInteger(size) || size < 0 || i + size >= out.length || out[i + size] !== 10) {
-                      return fail(
+                      return yield* fail(
                         "git cat-file --batch returned truncated content during snapshot diff, falling back to per-file git show",
                         { head },
                       )
@@ -668,7 +671,7 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                   }
 
                   if (i !== out.length) {
-                    return fail(
+                    return yield* fail(
                       "git cat-file --batch returned trailing data during snapshot diff, falling back to per-file git show",
                     )
                   }
