@@ -688,6 +688,18 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                 [...quote, ...args(["diff", "--no-ext-diff", "--name-status", "--no-renames", from, to, "--", "."])],
                 { cwd: state.directory },
               )
+              // git() 在 spawn 失败或非零退出时返回 { code: 1, text: "" } 而不是抛错,
+              // 直接解析 text 会把"命令失败"变成"零条差异"返回给调用方。本文件其余 9 处
+              // git 调用都检查 code 并留日志,这里同样处理。
+              if (statuses.code !== 0) {
+                yield* Effect.logWarning("failed to get snapshot status diff", {
+                  from,
+                  to,
+                  exitCode: statuses.code,
+                  stderr: statuses.stderr,
+                })
+                return []
+              }
 
               for (const line of statuses.text.trim().split("\n")) {
                 if (!line) continue
@@ -702,6 +714,15 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
                   cwd: state.directory,
                 },
               )
+              if (numstat.code !== 0) {
+                yield* Effect.logWarning("failed to get snapshot numstat diff", {
+                  from,
+                  to,
+                  exitCode: numstat.code,
+                  stderr: numstat.stderr,
+                })
+                return []
+              }
 
               const rows = numstat.text
                 .trim()
