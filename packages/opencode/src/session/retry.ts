@@ -51,7 +51,10 @@ export function delay(attempt: number, error?: SessionV1.APIError, random = Math
       const retryAfterMs = headers["retry-after-ms"]
       if (retryAfterMs) {
         const parsedMs = Number.parseFloat(retryAfterMs)
-        if (!Number.isNaN(parsedMs)) {
+        // 负值是无效提示(时钟偏差/占位响应/网关注入):cap() 会把负数原样返回,
+        // 调度器把负 Duration 当"立即到期",5 次重试会在毫秒内烧完 —— 过载时反而
+        // 把可恢复的 429 变成硬失败。零保持合法(显式"立即重试")。
+        if (!Number.isNaN(parsedMs) && parsedMs >= 0) {
           return cap(parsedMs)
         }
       }
@@ -59,7 +62,7 @@ export function delay(attempt: number, error?: SessionV1.APIError, random = Math
       const retryAfter = headers["retry-after"]
       if (retryAfter) {
         const parsedSeconds = Number.parseFloat(retryAfter)
-        if (!Number.isNaN(parsedSeconds)) {
+        if (!Number.isNaN(parsedSeconds) && parsedSeconds >= 0) {
           // convert seconds to milliseconds
           return cap(Math.ceil(parsedSeconds * 1000))
         }
