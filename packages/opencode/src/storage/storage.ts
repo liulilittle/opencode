@@ -248,8 +248,23 @@ const layer = Layer.effect(
     const wrap = <A>(target: string, body: Effect.Effect<A, FSUtil.Error>) =>
       body.pipe(Effect.catchIf(missing, () => fail(target)))
 
+    // 会话/消息/part 是本仓库里数据量最大、最不可重建的持久化对象,落盘必须原子:
+    // 直接覆写(target)在写入中途崩溃/断电/被杀时会留下半截 JSON,下一次 readJson
+    // 解码失败且没有备份可回滚。同仓库其余持久化点(models-dev / daemon / discovery /
+    // cassette / background-cli / server)全部走 tmp + rename,这里对齐它们。
+    // 临时文件必须与目标同目录(跨设备 rename 会失败),失败时清理临时文件避免堆积。
     const writeJson = Effect.fnUntraced(function* (target: string, content: unknown) {
-      yield* fs.writeWithDirs(target, JSON.stringify(content, null, 2))
+      const payload = JSON.stringify(content, null, 2)
+      const tmp = `${target}.${process.pid}.${Date.now()}.tmp`
+      yield* fs.writeWithDirs(tmp, payload)
+      yield* fs.rename(tmp, target).pipe(
+        Effect.catch((err) =>
+          Effect.gen(function* () {
+            yield* fs.remove(tmp).pipe(Effect.ignore)
+            return yield* Effect.fail(err)
+          }),
+        ),
+      )
     })
 
     const withResolved = <A, E>(
