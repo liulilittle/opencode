@@ -322,8 +322,15 @@ const layer = Layer.effect(
           include: "file",
         })
         .pipe(Effect.catch(() => Effect.succeed<string[]>([])))
+      // writeJson 先写 `<target>.<pid>.<ts>.tmp` 再 rename,进程在两者之间被杀会
+      // 留下 .tmp 残留。它不是数据,必须在还原键之前剔除,否则会被当成一条
+      // 名叫 "xxx.json.<pid>.<ts>" 的记录返回给调用方。
+      // 后缀剥离必须按 ".json".length,不能写死数字:写死后任何后缀长度变化
+      // 都会静默错位。
+      const suffix = ".json"
       return result
-        .map((x) => [...prefix, ...x.slice(0, -5).split(path.sep)])
+        .filter((x) => x.endsWith(suffix))
+        .map((x) => [...prefix, ...x.slice(0, -suffix.length).split(path.sep)])
         .toSorted((a, b) => a.join("/").localeCompare(b.join("/")))
     })
 
