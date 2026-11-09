@@ -65,7 +65,16 @@ export function isOverflow(input: {
   if (input.cfg.compaction?.auto === false) return false
   if (input.model.limit.context === 0) return false
 
+  // `tokens.output` 是**已减去 reasoning** 的可见输出(session.ts:376),所以 reasoning 是独立
+  // 字段而不是 output 的一部分;回退求和必须显式包含它,否则 reasoning 密集的模型(隐藏思考
+  // 只体现在 reasoning 上)会被系统性低估 → 压缩推迟 → 先撞 provider 上限才被动报错。
+  // 这与插件钩子 prompt.ts:1431-1437 的同名回退口径一致。
   const count =
-    input.tokens.total || input.tokens.input + input.tokens.output + input.tokens.cache.read + input.tokens.cache.write
+    input.tokens.total ||
+    input.tokens.input +
+      input.tokens.output +
+      input.tokens.reasoning +
+      input.tokens.cache.read +
+      input.tokens.cache.write
   return count >= usable(input)
 }

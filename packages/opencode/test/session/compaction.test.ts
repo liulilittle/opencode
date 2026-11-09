@@ -561,6 +561,38 @@ describe("session.compaction.isOverflow", () => {
       },
     ),
   )
+
+  // goal:reasoning 必须计入总额。`tokens.output` 是**已减去 reasoning** 的可见输出
+  // (session.ts:376 `safe(outputTokens - reasoningTokens)`),故 `reasoning` 是独立字段。
+  // 所有既有用例都写 `reasoning: 0`,等于该字段从未被覆盖 —— 这组用例补上非零路径。
+  it.live(
+    "counts reasoning tokens toward the context total",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const compact = yield* SessionCompaction.Service
+        // usable = context - maxOutput = 100_000 - 32_000 = 68_000
+        const model = createModel({ context: 100_000, output: 32_000 })
+        // 不含 reasoning: 55_000 + 5_000 = 60_000 < 68_000(不超);
+        // 含 reasoning:  60_000 + 10_000 = 70_000 >= 68_000(必超)。
+        const tokens = { input: 55_000, output: 5_000, reasoning: 10_000, cache: { read: 0, write: 0 } }
+        expect(yield* compact.isOverflow({ tokens, model })).toBe(true)
+      }),
+    ),
+  )
+
+  it.live(
+    "reasoning tokens alone can push the total over the limit",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const compact = yield* SessionCompaction.Service
+        // usable = 100_000 - 32_000 = 68_000
+        const model = createModel({ context: 100_000, output: 32_000 })
+        // 只有 reasoning 能把总额推过线:60_000(不含) vs 120_000(含)。
+        const tokens = { input: 55_000, output: 5_000, reasoning: 60_000, cache: { read: 0, write: 0 } }
+        expect(yield* compact.isOverflow({ tokens, model })).toBe(true)
+      }),
+    ),
+  )
 })
 
 describe("session.compaction.create", () => {

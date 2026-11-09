@@ -363,7 +363,12 @@ export const getUsage = (input: { model: Provider.Model; usage: Usage; metadata?
   // tokens to get the non-cached input count for separate cost calculation.
   const adjustedInputTokens = safe(inputTokens - cacheReadInputTokens - cacheWriteInputTokens)
 
-  const total = input.usage.totalTokens
+  // `totalTokens` 是 provider 直接上报的外部数字(ai-sdk.ts 原样透传,可缺失/NaN/Infinity/负数)。
+  // 它不经 `safe()` 就会带着负值或 Infinity 进 `isOverflow`(overflow.ts:68),
+  // 那里的 `total || sum` 只把 falsy 当前提回退:负数/Infinity 都是 truthy 会被直接采用,
+  // 导致负数时**永不压缩**、Infinity 时**每轮都压缩**。缺省仍保留 undefined,
+  // 让消费方回退到分项求和(不能伪造成 0)。
+  const total = input.usage.totalTokens === undefined ? undefined : safe(input.usage.totalTokens)
 
   const tokens = {
     total,
