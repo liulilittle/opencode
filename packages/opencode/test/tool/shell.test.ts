@@ -340,6 +340,30 @@ describe("tool.shell permissions", () => {
     ),
   )
 
+  // `~user/...` 指向其它用户的家目录,shell 会把它展开到本机根目录之外。
+  // 如果解析器把它当成相对路径,就会得到 `<cwd>/~user/...` —— 落在实例根目录内,
+  // external_directory 检查因此认为"内部"而放行,实际命令访问的却是外部文件。
+  // 这里断言它必须至少触发一次权限询问(bash 的 patterns 询问即可)。
+  each("does not silently allow paths outside the project via ~user", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const err = new Error("stop after permission")
+        const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+        expect(
+          yield* fail(
+            {
+              command: "cat ~root/.ssh/id_rsa",
+            },
+            capture(requests, err),
+          ),
+        ).toMatchObject({ message: err.message })
+        // 关键:必须停下来问,而不是一路放行到执行
+        expect(requests.length).toBeGreaterThan(0)
+      }),
+    ),
+  )
+
   if (process.platform === "win32") {
     if (bash) {
       it.live("asks for nested bash command permissions [bash]", () =>

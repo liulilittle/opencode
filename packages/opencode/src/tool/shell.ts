@@ -135,6 +135,11 @@ function unquote(text: string) {
 function home(text: string) {
   if (text === "~") return os.homedir()
   if (text.startsWith("~/") || text.startsWith("~\\")) return path.join(os.homedir(), text.slice(2))
+  // `~user/...` 是"其它用户的家目录"。这里无法解析它(shell 会展开成该用户的
+  // home),若原样返回会被当成相对路径、解析到实例根目录内,于是 external_directory
+  // 权限检查认为"内部"而放行,实际命令却访问了根目录外的文件。
+  // 返回 undefined 让 argPath 放弃推断,交由 patterns 权限询问兜底。
+  if (text.startsWith("~")) return undefined
   return text
 }
 
