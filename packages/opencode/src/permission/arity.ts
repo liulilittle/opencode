@@ -1,11 +1,36 @@
+// 字典的 arity 是**子命令**个数,不是 token 个数:注释第 2 条写明
+// "Flags NEVER count as tokens. Only subcommands count."
+// prefix() 的结果会被 shell.ts 拼成 always 授权模式(`<prefix> *`),
+// 所以 flag 一旦混进去,通配符就会吞掉 flag 的取值:
+// `pip --index-url http://corp install x` 会变成 `pip --index-url *`,
+// 之后任何 index-url(包括恶意的)都被自动放行。
+//
+// 更糟的是"flag 后跟任意内容"的形式:`python -c "..."` 若跳过 `-c` 继续切,
+// 代码字符串会被当成子命令固化进授权模式(`python import os;... *`)。
+//
+// 因此规则取最严格的一种:**在第一个 flag 处截断**,只有 flag 之前的位置参数
+// 参与子命令匹配。这样
+//   - `git checkout main`      -> 切出 `git checkout`
+//   - `docker compose up -d`   -> 切出 `docker compose up`(flag 在末尾,不影响)
+//   - `npm -v`                 -> 截断成 `npm`
+//   - `pip --index-url X ...`  -> 截断成 `pip`
+//   - `python -c "<code>"`     -> 截断成 `python`
+// 代价是某些"flag 在中间"的命令授权范围变窄(需要再次询问),这是安全的
+// 失败方向:少授权只会多问一次,不会静默放行。
+function leadingPositionals(tokens: string[]): string[] {
+  const index = tokens.findIndex((token) => token.startsWith("-") && token.length > 1)
+  return index < 0 ? tokens : tokens.slice(0, index)
+}
+
 export function prefix(tokens: string[]) {
-  for (let len = tokens.length; len > 0; len--) {
-    const prefix = tokens.slice(0, len).join(" ")
+  const subcommands = leadingPositionals(tokens)
+  for (let len = subcommands.length; len > 0; len--) {
+    const prefix = subcommands.slice(0, len).join(" ")
     const arity = ARITY[prefix]
-    if (arity !== undefined) return tokens.slice(0, arity)
+    if (arity !== undefined) return subcommands.slice(0, arity)
   }
   if (tokens.length === 0) return []
-  return tokens.slice(0, 1)
+  return subcommands.slice(0, 1)
 }
 
 /* Generated with following prompt:
