@@ -353,7 +353,12 @@ export const make = Effect.gen(function* () {
       return [{ info: snapshot(next), done: job.done, scope: job.scope }, new Map(jobs).set(id, next)]
     })
     if (result.info && result.done) yield* Deferred.succeed(result.done, result.info).pipe(Effect.ignore)
-    if (result.scope) yield* Scope.close(result.scope, Exit.void)
+    // 关闭动作必须 fork 到实例 scope:到这里 job 已经出队并被标记为 cancelled,
+    // `done` 也已叫醒等待者。若紧接着的关闭在调用方被中断时被跳过,任务 fiber
+    // 会继续运行,而所有观察者都看到 "cancelled"。与 settle 的处理保持一致。
+    if (result.scope) {
+      yield* Scope.close(result.scope, Exit.void).pipe(Effect.forkIn(state.scope, { startImmediately: true }))
+    }
     return result.info
   })
 
