@@ -1,6 +1,6 @@
 import { describe, expect } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { Deferred, Effect } from "effect"
+import { Deferred, Effect, Fiber } from "effect"
 import { BackgroundJob } from "@/background/job"
 import { testEffect } from "../lib/effect"
 
@@ -224,6 +224,60 @@ describe("background.job", () => {
 
       yield* Deferred.succeed(latch, undefined)
       expect((yield* jobs.wait({ id: job.id })).info?.output).toBe("done")
+    }),
+  )
+
+  it.instance("runs onPromote even when the promoting fiber is interrupted", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const started = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const finished = yield* Deferred.make<void>()
+      const job = yield* jobs.start({
+        type: "test",
+        run: Effect.never,
+        onPromote: Deferred.succeed(started, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+          Effect.andThen(Deferred.succeed(finished, undefined)),
+          Effect.asVoid,
+        ),
+      })
+
+      const fiber = yield* Effect.forkScoped(jobs.promote(job.id))
+      const began = yield* Deferred.await(started).pipe(Effect.timeoutOption("5 seconds"))
+      expect(began._tag).toBe("Some")
+      expect((yield* jobs.get(job.id))?.metadata?.background).toBe(true)
+
+      yield* Fiber.interrupt(fiber)
+      yield* Deferred.succeed(release, undefined)
+      const done = yield* Deferred.await(finished).pipe(Effect.timeoutOption("5 seconds"))
+      expect(done._tag).toBe("Some")
+      yield* jobs.cancel(job.id)
+    }),
+  )
+
+  it.instance("promoted waiters are woken even when the promoting fiber is interrupted", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const entered = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const job = yield* jobs.start({
+        type: "test",
+        run: Effect.never,
+        onPromote: Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)), Effect.asVoid),
+      })
+
+      const waiter = yield* Effect.forkScoped(jobs.waitForPromotion(job.id))
+      yield* Effect.yieldNow
+      const fiber = yield* Effect.forkScoped(jobs.promote(job.id))
+      const began = yield* Deferred.await(entered).pipe(Effect.timeoutOption("5 seconds"))
+      expect(began._tag).toBe("Some")
+
+      yield* Fiber.interrupt(fiber)
+      yield* Deferred.succeed(release, undefined)
+      const woken = yield* Fiber.await(waiter).pipe(Effect.timeoutOption("5 seconds"))
+      expect(woken._tag).toBe("Some")
+      yield* jobs.cancel(job.id)
     }),
   )
 

@@ -308,30 +308,47 @@ export const make = Effect.gen(function* () {
   })
 
   const promote: Interface["promote"] = Effect.fn("BackgroundJob.promote")(function* (id) {
-    const result = yield* SynchronizedRef.modifyEffect(
-      state.jobs,
-      Effect.fnUntraced(function* (jobs) {
-        const job = jobs.get(id)
-        if (!job || job.info.status !== "running") return [{}, jobs] as readonly [PromoteResult, Map<string, Active>]
-        if (job.info.metadata?.background === true)
-          return [{ info: snapshot(job) }, jobs] as readonly [PromoteResult, Map<string, Active>]
-        const next = {
-          ...job,
-          onPromote: undefined,
-          info: {
-            ...job.info,
-            metadata: { ...job.info.metadata, background: true },
-          },
+    // 状态提交与通知派发必须成组。modify 一返回,metadata.background 就已是 true 且
+    // onPromote 已从状态里摘掉 —— 这次提升从此无法重放。若调用方在"提交完、通知前"被中断,
+    // 状态说"已提升",而父会话永远收不到完成通知。整段只在同步原语上停留,不会挂起调用方。
+    return yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const committed = yield* SynchronizedRef.modifyEffect(
+          state.jobs,
+          Effect.fnUntraced(function* (jobs) {
+            const job = jobs.get(id)
+            if (!job || job.info.status !== "running")
+              return [{}, jobs] as readonly [PromoteResult, Map<string, Active>]
+            if (job.info.metadata?.background === true)
+              return [{ info: snapshot(job) }, jobs] as readonly [PromoteResult, Map<string, Active>]
+            const next = {
+              ...job,
+              onPromote: undefined,
+              info: {
+                ...job.info,
+                metadata: { ...job.info.metadata, background: true },
+              },
+            }
+            return [
+              { info: snapshot(next), onPromote: job.onPromote, promoted: job.promoted },
+              new Map(jobs).set(id, next),
+            ] as readonly [PromoteResult, Map<string, Active>]
+          }),
+        )
+        if (committed.info && committed.promoted) {
+          yield* Deferred.succeed(committed.promoted, committed.info).pipe(Effect.ignore)
         }
-        return [
-          { info: snapshot(next), onPromote: job.onPromote, promoted: job.promoted },
-          new Map(jobs).set(id, next),
-        ] as readonly [PromoteResult, Map<string, Active>]
+        if (committed.onPromote) {
+          // onPromote 由调用方提供,可能长时间挂起(它会向父会话注入并驱动一轮),
+          // 不能绑在调用方的生命周期上,否则调用方一被中断这次提升就再也不会通知。
+          yield* restore(committed.onPromote).pipe(
+            Effect.ignore,
+            Effect.forkIn(state.scope, { startImmediately: true }),
+          )
+        }
+        return committed.info
       }),
     )
-    if (result.info && result.promoted) yield* Deferred.succeed(result.promoted, result.info).pipe(Effect.ignore)
-    if (result.onPromote) yield* result.onPromote.pipe(Effect.ignore)
-    return result.info
   })
 
   const cancel: Interface["cancel"] = Effect.fn("BackgroundJob.cancel")(function* (id) {
