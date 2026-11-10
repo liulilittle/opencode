@@ -33,19 +33,29 @@ test("edge cases", () => {
 })
 
 // prefix() 的结果会被 shell.ts 拼成 always 授权模式(`<prefix> *`)。
-// 字典的生成规则(dict 注释第 2 条)写明 flags 不计数,只有当 flag 被当成
-// 子命令时,通配符才会把 flag 的取值一起吞掉 —— 例如
-// `pip --index-url http://corp install x` 授权成 `pip --index-url *`,
-// 之后任意 index-url 都被放行。因此在第一个 flag 处截断。
-test("flags are never treated as subcommands", () => {
-  expect(BashArity.prefix(["npm", "-v"])).toEqual(["npm"])
-  expect(BashArity.prefix(["ls", "-la"])).toEqual(["ls"])
-  expect(BashArity.prefix(["pip", "--index-url", "http://evil.example", "install", "pkg"])).toEqual(["pip"])
-  expect(BashArity.prefix(["python", "-c", "import os;os.system('evil')"])).toEqual(["python"])
+// 字典的生成规则(dict 注释第 2 条)写明 flags 不计数 —— 但这只影响
+// **arity 的计数方式**,不代表可以把 flag 从结果里删掉:
+//   - 删掉 flag(`git --version` -> `git`)会把授权放大成整个程序;
+//   - 把 flag 当子命令(`pip --index-url http://corp` -> `pip --index-url`)
+//     会让通配符吞掉取值,`pip --index-url <任意值>` 都被放行。
+// 正确做法:arity 数位置参数,边界切在原始 token 上 —— flag 与其取值一起固化。
+test("flags never count toward arity", () => {
+  expect(BashArity.prefix(["git", "--version"])).toEqual(["git", "--version"])
+  expect(BashArity.prefix(["npm", "-v"])).toEqual(["npm", "-v"])
+  expect(BashArity.prefix(["git", "checkout", "-b", "feature"])).toEqual(["git", "checkout"])
+})
+
+test("flag values are pinned into the grant pattern", () => {
+  expect(BashArity.prefix(["pip", "--index-url", "http://corp.example", "install", "pkg"])).toEqual([
+    "pip",
+    "--index-url",
+    "http://corp.example",
+  ])
+  expect(BashArity.prefix(["git", "-C", "/repo", "status"])).toEqual(["git", "-C", "/repo"])
+  expect(BashArity.prefix(["python", "-c", "import os"])).toEqual(["python", "-c", "import os"])
 })
 
 test("flags after the subcommand keep the subcommand", () => {
-  expect(BashArity.prefix(["git", "checkout", "-b", "feature"])).toEqual(["git", "checkout"])
   expect(BashArity.prefix(["docker", "compose", "up", "-d"])).toEqual(["docker", "compose", "up"])
   expect(BashArity.prefix(["npm", "run", "dev", "--silent"])).toEqual(["npm", "run", "dev"])
 })
