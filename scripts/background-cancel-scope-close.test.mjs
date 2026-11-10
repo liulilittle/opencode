@@ -147,12 +147,12 @@ if (cancelBody) {
     `实际关闭语句: ${JSON.stringify(closeText.slice(0, 200) || "(未匹配)")}`,
   )
 
-  // B1b: forkIn 的目标必须立即启动。`startImmediately: false` 会把关闭排到
-  // 实例 scope 关闭时才执行 —— 那时 job 早就不该再活着,等于没关。
-  // 静态断言必须查到这个选项,否则"加了 forkIn 但语义错"仍会通过。
+  // B1b: forkIn 的目标必须在提交后立刻启动。实测 startImmediately: false 仍会在
+  // 下一次调度让步时执行,所以它不是"永不执行" —— 但它把关闭推迟到调用栈退让之后,
+  // 在此期间观察者仍看到 cancelled 而任务还活着。形态锁要求显式 true。
   const needsImmediate = /forkIn\(state\.scope, \{ startImmediately: true \}\)/.test(closeText.replace(/\s+/g, " "))
   check(
-    "B1b: forkIn 必须带 startImmediately: true(否则关闭被推迟到实例销毁)",
+    "B1b: forkIn 必须带 startImmediately: true(关闭不得推迟到下一次调度让步)",
     needsImmediate,
     `实际: ${JSON.stringify(closeText.replace(/\s+/g, " ").slice(0, 200) || "(未匹配)")}`,
   )
