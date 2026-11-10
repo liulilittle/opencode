@@ -17,6 +17,19 @@ describe("SystemPrompt.environmentDate", () => {
     expect(SystemPrompt.environmentDate(created)).toBe(SystemPrompt.environmentDate(created))
   })
 
+  // 跨天是缓存失效的唯一真实触发条件:会话创建于第 1 天、第 2 天继续对话时,
+  // 若日期取 now 则前缀整段变化 → provider 前缀缓存全失效。断言必须是"跨天仍同值",
+  // 而不是"同一输入调两次相同"(后者是恒真)。
+  test("keeps the same date when the conversation continues past midnight", () => {
+    const day1 = new Date(2020, 0, 1, 23, 59, 0).getTime()
+    const day2 = new Date(2020, 0, 2, 0, 1, 0).getTime()
+    // 前置:两个时刻确实落在不同日历日(否则本测试测不到跨天)
+    expect(new Date(day1).toDateString()).not.toBe(new Date(day2).toDateString())
+    // 会话创建于 day1,day2 继续 → 仍报 day1
+    expect(SystemPrompt.environmentDate(day1)).toBe(new Date(day1).toDateString())
+    expect(SystemPrompt.environmentDate(day1)).not.toBe(new Date(day2).toDateString())
+  })
+
   test("falls back to the current date when omitted", () => {
     const now = new Date().toDateString()
     expect(SystemPrompt.environmentDate()).toBe(now)
