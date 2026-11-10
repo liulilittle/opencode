@@ -774,7 +774,7 @@ it.instance(
 )
 
 it.instance(
-  "reply - always persists approval and resolves",
+  "reply - always persists approval for the same session only",
   () =>
     Effect.gen(function* () {
       const fiber = yield* ask({
@@ -791,15 +791,169 @@ it.instance(
       yield* reply({ requestID: PermissionV1.ID.make("per_test3"), reply: "always" })
       yield* Fiber.join(fiber)
 
-      const result = yield* ask({
-        sessionID: SessionID.make("session_test2"),
+      // 同会话的后续请求直接放行
+      const sameSession = yield* ask({
+        sessionID: SessionID.make("session_test"),
         permission: "bash",
         patterns: ["ls"],
         metadata: {},
         always: [],
         ruleset: [],
       })
-      expect(result).toBeUndefined()
+      expect(sameSession).toBeUndefined()
+    }),
+  { git: true },
+)
+
+it.instance(
+  "reply - always is scoped to its own session only",
+  () =>
+    Effect.gen(function* () {
+      const owner = PermissionV1.ID.make("per_test3b")
+      const first = yield* ask({
+        id: owner,
+        sessionID: SessionID.make("session_owner"),
+        permission: "bash",
+        patterns: ["ls"],
+        metadata: {},
+        always: ["ls"],
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+
+      yield* waitForPending(1)
+      yield* reply({ requestID: owner, reply: "always" })
+      yield* Fiber.join(first)
+
+      // 1) 同会话的直接放行必须在写入后生效 —— 只断言"别的会话被拦"会让
+      //    "所有 always 都没写进去"这种实现也通过。
+      const same = yield* ask({
+        sessionID: SessionID.make("session_owner"),
+        permission: "bash",
+        patterns: ["ls"],
+        metadata: {},
+        always: [],
+        ruleset: [],
+      })
+      expect(same).toBeUndefined()
+
+      // 2) 另一个会话必须重新询问:文档 permissions.mdx:196 规定
+      //    always 只在当前会话内有效。
+      const other = yield* ask({
+        id: PermissionV1.ID.make("per_test3c"),
+        sessionID: SessionID.make("session_other"),
+        permission: "bash",
+        patterns: ["ls"],
+        metadata: {},
+        always: [],
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+
+      yield* waitForPending(1)
+      expect((yield* list()).map((item) => item.id)).toEqual([PermissionV1.ID.make("per_test3c")])
+      yield* rejectAll()
+      yield* Fiber.await(other)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "reply - always auto-resolve ignores other sessions' approvals",
+  () =>
+    Effect.gen(function* () {
+      // 会话 B 先批准 edit/*
+      const b0 = yield* ask({
+        id: PermissionV1.ID.make("per_test8b0"),
+        sessionID: SessionID.make("session_b8"),
+        permission: "edit",
+        patterns: ["src/*"],
+        metadata: {},
+        always: ["src/*"],
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+      yield* waitForPending(1)
+      yield* reply({ requestID: PermissionV1.ID.make("per_test8b0"), reply: "always" })
+      yield* Fiber.join(b0)
+
+      // 会话 A:一个 bash pending,一个 edit pending。
+      // 在 A 对 bash 点 always 后,A 的 edit pending 必须**仍然 pending**
+      // —— 否则说明 B 会话的 edit 批准泄漏到了 A。
+      const a1 = yield* ask({
+        id: PermissionV1.ID.make("per_test8a1"),
+        sessionID: SessionID.make("session_a8"),
+        permission: "bash",
+        patterns: ["ls"],
+        metadata: {},
+        always: ["ls"],
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+
+      const a2 = yield* ask({
+        id: PermissionV1.ID.make("per_test8a2"),
+        sessionID: SessionID.make("session_a8"),
+        permission: "edit",
+        patterns: ["src/*"],
+        metadata: {},
+        always: [],
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+
+      yield* waitForPending(2)
+      yield* reply({ requestID: PermissionV1.ID.make("per_test8a1"), reply: "always" })
+
+      yield* Fiber.join(a1)
+      // a2 必须仍 pending:它只能被**本会话**的批准放行,B 会话的 edit 批准不算
+      expect((yield* list()).map((item) => item.id)).toEqual([PermissionV1.ID.make("per_test8a2")])
+
+      yield* rejectAll()
+      yield* Fiber.await(a2)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "reply - always auto-resolves same-session pending requests",
+  () =>
+    Effect.gen(function* () {
+      const a = yield* ask({
+        id: PermissionV1.ID.make("per_test7a"),
+        sessionID: SessionID.make("session_batch"),
+        permission: "bash",
+        patterns: ["ls"],
+        metadata: {},
+        always: ["ls"],
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+
+      const b = yield* ask({
+        id: PermissionV1.ID.make("per_test7b"),
+        sessionID: SessionID.make("session_batch"),
+        permission: "bash",
+        patterns: ["ls"],
+        metadata: {},
+        always: [],
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+
+      // 另一个会话里同样权限的等待必须**不**被顺带放行
+      const other = yield* ask({
+        id: PermissionV1.ID.make("per_test7c"),
+        sessionID: SessionID.make("session_batch_other"),
+        permission: "bash",
+        patterns: ["ls"],
+        metadata: {},
+        always: [],
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+
+      yield* waitForPending(3)
+      yield* reply({ requestID: PermissionV1.ID.make("per_test7a"), reply: "always" })
+
+      yield* Fiber.join(a)
+      yield* Fiber.join(b)
+      expect((yield* list()).map((item) => item.id)).toEqual([PermissionV1.ID.make("per_test7c")])
+
+      yield* rejectAll()
+      yield* Fiber.await(other)
     }),
   { git: true },
 )

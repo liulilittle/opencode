@@ -22,7 +22,9 @@ interface PendingEntry {
 
 interface State {
   pending: Map<PermissionV1.ID, PendingEntry>
-  approved: PermissionV1.Rule[]
+  // 文档 permissions.mdx:196 规定 `always` 只在**当前会话**内有效。
+  // 用 sessionID 分组保存,否则 A 会话点过的 always 会为 B 会话直接放行。
+  approved: Map<PermissionV1.Request["sessionID"], PermissionV1.Rule[]>
 }
 
 export function evaluate(permission: string, pattern: string, ...rulesets: PermissionV1.Ruleset[]): PermissionV1.Rule {
@@ -48,7 +50,7 @@ const layer = Layer.effect(
         void ctx
         const state = {
           pending: new Map<PermissionV1.ID, PendingEntry>(),
-          approved: [],
+          approved: new Map<PermissionV1.Request["sessionID"], PermissionV1.Rule[]>(),
         }
 
         yield* Effect.addFinalizer(() =>
@@ -57,6 +59,7 @@ const layer = Layer.effect(
               yield* Deferred.fail(item.deferred, new PermissionV1.RejectedError())
             }
             state.pending.clear()
+            state.approved.clear()
           }),
         )
 
@@ -68,9 +71,11 @@ const layer = Layer.effect(
       const { approved, pending } = yield* InstanceState.get(state)
       const { ruleset, ...request } = input
       let needsAsk = false
+      // 只看本会话的批准记录。
+      const scoped = approved.get(request.sessionID) ?? []
 
       for (const pattern of request.patterns) {
-        const rule = evaluate(request.permission, pattern, ruleset, approved)
+        const rule = evaluate(request.permission, pattern, ruleset, scoped)
         yield* Effect.logInfo("evaluated", { permission: request.permission, pattern, action: rule })
         if (rule.action === "deny") {
           return yield* new PermissionV1.DeniedError({
@@ -143,17 +148,22 @@ const layer = Layer.effect(
       if (input.reply === "once") return
 
       for (const pattern of existing.info.always) {
-        approved.push({
-          permission: existing.info.permission,
-          pattern,
-          action: "allow",
-        })
+        const scoped = approved.get(existing.info.sessionID) ?? []
+        approved.set(existing.info.sessionID, [
+          ...scoped,
+          {
+            permission: existing.info.permission,
+            pattern,
+            action: "allow",
+          },
+        ])
       }
 
       for (const [id, item] of pending.entries()) {
         if (item.info.sessionID !== existing.info.sessionID) continue
+        const scoped = approved.get(item.info.sessionID) ?? []
         const ok = item.info.patterns.every(
-          (pattern) => evaluate(item.info.permission, pattern, approved).action === "allow",
+          (pattern) => evaluate(item.info.permission, pattern, scoped).action === "allow",
         )
         if (!ok) continue
         pending.delete(id)
