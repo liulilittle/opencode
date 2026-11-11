@@ -642,61 +642,33 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
       completed.add(msg.info.parentID)
   }
   result.reverse()
-  /**
-   * 以"最后一次压缩"为界重建上下文。三个要点:
-   *
-   * 1) 边界不能只认 `tail_start_id !== undefined`:`select()` 在"最后一个 turn 单独就
-   *    超预算"(compaction.ts:331)或"保留全部即 start===0"(compaction.ts:334)时会返回
-   *    `tail_start_id: undefined`,表示这次压缩覆盖了全部历史。旧实现跳过这类标记,
-   *    于是回退到更早的压缩边界,摘要被无视、上下文没有替换
-   *    (实测 Q65RBr1m 12:07:23 压缩成功 ctx=162246 后仍返回 233 条/149,888 tokens)。
-   *
-   * 2) 摘要不一定挂在 marker 下:overflow 压缩会 replay 真实用户消息,摘要的 parentID
-   *    指向 replay 出来的那条 user 消息(compaction.ts replay 分支),不是 marker 本身。
-   *    旧实现用 `parentID === marker.id` 匹配,这种情况下 summaryIndex 恒为 -1,
-   *    直接 return 全量历史。这里改为"marker 之后、下一个 marker 之前的第一个成功摘要"。
-   *
-   * 3) 失败的摘要(finish 缺失或 error)不算边界:压缩没成功就必须保留原历史。
-   */
-  const markerIndexes = result.flatMap((msg, index) =>
-    msg.info.role === "user" && msg.parts.some((item) => item.type === "compaction") ? [index] : [],
+  const compactionIndex = result.findLastIndex(
+    (msg) =>
+      msg.info.role === "user" &&
+      msg.parts.some((item): item is CompactionPart => item.type === "compaction" && item.tail_start_id !== undefined),
   )
-  const isCompletedSummary = (msg: WithParts) =>
-    msg.info.role === "assistant" && msg.info.summary === true && !!msg.info.finish && !msg.info.error
-  let boundary = -1
-  let summaryIndex = -1
-  const boundaries: { marker: number; summary: number }[] = []
-  for (const [i, markerIndex] of markerIndexes.entries()) {
-    const nextMarker = markerIndexes[i + 1] ?? result.length
-    const found = result.findIndex((msg, index) => index > markerIndex && index < nextMarker && isCompletedSummary(msg))
-    if (found < 0) continue
-    boundaries.push({ marker: markerIndex, summary: found })
-    boundary = markerIndex
-    summaryIndex = found
-  }
-  if (boundary < 0) return result
-  const compaction = result[boundary]!
-  const part = compaction.parts.find((item): item is CompactionPart => item.type === "compaction")
+  const compaction = result[compactionIndex]
+  const part = compaction?.parts.find(
+    (item): item is CompactionPart => item.type === "compaction" && item.tail_start_id !== undefined,
+  )
+  const summaryIndex = compaction
+    ? result.findIndex(
+        (msg, index) =>
+          index > compactionIndex &&
+          msg.info.role === "assistant" &&
+          msg.info.summary &&
+          msg.info.parentID === compaction.info.id,
+      )
+    : -1
   const tailIndex = part?.tail_start_id ? result.findIndex((msg) => msg.info.id === part.tail_start_id) : -1
-  /**
-   * 压缩后用摘要替换上下文:边界之前的历史全部丢弃,只保留 [marker, 摘要] 与摘要之后的消息。
-   * 官方语义允许保留"最近未概括的回合"(tail),但 tail 绝不能落在旧压缩已概括的区域内 ——
-   * 那会把旧 marker/旧摘要/已概括的原文一起搬回,压缩后反而变大
-   * (实测 Q65RBr1m 04:06:55: 5,350 → 12,843 tokens)。
-   * 源头已在 compaction.ts 修正(select 只在已压缩视图上选 tail);这里再兜底剔除
-   * 更早的 marker 与旧摘要,保证输出里只有一份摘要。
-   */
-  const superseded = new Set(
-    boundaries.filter((item) => item.marker < boundary).flatMap((item) => [item.marker, item.summary]),
-  )
-  /**
-   * 中间片 = [tail_start_id, 边界) 的原始消息,只剔除更早的 compaction marker 与旧摘要
-   * (它们的内容已被新摘要吸收)。tail 起点本身必须尊重:它表示"从这里起原样保留",
-   * 抬升它会丢掉最近回合(compaction.test.ts 有对应用例)。
-   */
-  const from = tailIndex < 0 ? boundary : tailIndex
-  const middle = result.slice(from, boundary).filter((_, offset) => !superseded.has(from + offset))
-  return [...result.slice(boundary, summaryIndex + 1), ...middle, ...result.slice(summaryIndex + 1)]
+  if (tailIndex >= 0 && tailIndex < compactionIndex && summaryIndex > compactionIndex) {
+    return [
+      ...result.slice(compactionIndex, summaryIndex + 1),
+      ...result.slice(tailIndex, compactionIndex),
+      ...result.slice(summaryIndex + 1),
+    ]
+  }
+  return result
 }
 
 export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: SessionID) {
