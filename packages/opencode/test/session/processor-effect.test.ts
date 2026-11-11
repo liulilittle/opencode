@@ -378,13 +378,28 @@ it.live("session.processor effect tests stop after token overflow requests compa
         const database = yield* Database.Service
         const { processors, session, provider } = yield* boot()
 
-        yield* llm.text("after", { usage: { input: 100, output: 0 } })
+        yield* llm.text("after", { usage: { input: 200_000, output: 0 } })
 
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "compact")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
         const base = yield* provider.getModel(ref.providerID, ref.modelID)
-        const mdl = { ...base, limit: { context: 20, output: 10 } }
+        /**
+         * 这个测试要覆盖的是"流正常跑完后、由 usage 触发压缩"(processor.ts:493
+         * 的 finish-step 分支)。它依赖三个预算条件同时成立:
+         *   1) 预检必须放行: usable > 请求估算(约 23~31),否则 llm.ts:149 的硬预检
+         *      先抛 ContextOverflowError,流不会开始(那条路径同样返回 "compact",
+         *      于是 parts 为空、后两条断言失败);
+         *   2) usage 必须触发压缩: usage >= usable;
+         *   3) output 不能太小: maxOutputTokens = min(limit.output, OUTPUT_TOKEN_MAX),
+         *      过小(如 10)会让下游流静默产不出任何事件,parts 同样为空。
+         * 取 input=100000 / output=50000 → usable = 100000 - min(20000,50000) = 80000,
+         * 预检放行(maxOutputTokens 也是 20000,足以正常流式返回);
+         * usage 取 input:200000 → 200000 >= 80000,触发压缩。
+         * 原值 context:20 / output:10 / usage:100 → usable=10 且 maxOutputTokens=10,
+         * 预检与流式两条全不满足,测试从未跑到 usage 分支。
+         */
+        const mdl = { ...base, limit: { context: 200_000, input: 100_000, output: 50_000 } }
         const handle = yield* processors.create({
           assistantMessage: msg,
           sessionID: chat.id,

@@ -150,7 +150,11 @@ describe("session.message-v2.toModelMessage", () => {
     expect(JSON.stringify(result)).toContain("SECRET_REASONING")
   })
 
-  test("cross-model switch preserves reasoning as visible text (for continuity)", async () => {
+  // 回归: 跨模型时无签名的 reasoning 必须整体丢弃,不得转成可见正文。
+  // 旧行为(differentModel => reasoning 全部转 text)会让历史推理按正文重发:
+  // 实测某会话 428 条历史中 reasoning 占 1,886,249 字符(72%),把压缩请求推到
+  // 930,741 tokens、下一次主请求 998,919 超过 968,000 上限,压缩看似无效。
+  test("drops unsigned cross-model reasoning instead of inflating the request", async () => {
     const userID = "m-user"
     const assistantID = "m-assistant"
     const input: SessionV1.WithParts[] = [
@@ -169,10 +173,36 @@ describe("session.message-v2.toModelMessage", () => {
         ],
       },
     ]
-    // 跨模型时 reasonings 转可见文本，新模型知道之前推理；元数据不带。
     const result = await MessageV2.toModelMessages(input, model)
-    expect(JSON.stringify(result)).toContain("CROSS_MODEL_REASONING")
+    // 无签名推理既不作为 reasoning 也不作为 text 出现
+    expect(JSON.stringify(result)).not.toContain("CROSS_MODEL_REASONING")
+    // 真内容不受影响
+    expect(JSON.stringify(result)).toContain("answer")
     expect(JSON.stringify(result)).not.toContain("providerMetadata")
+  })
+
+  // 跨模型但携带可重放签名(bedrock 等)时仍必须保留,否则那些 provider 会 400。
+  test("keeps signed reasoning even across a model switch", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+    const input: SessionV1.WithParts[] = [
+      { info: userInfo(userID), parts: [{ ...basePart(userID, "u1"), type: "text", text: "go" }] },
+      {
+        info: assistantInfo(assistantID, userID, undefined, { providerID: "other", modelID: "other" }),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "reasoning",
+            text: "CROSS_MODEL_SIGNED",
+            metadata: { bedrock: { signature: "sig-1" } },
+            time: { start: 0 },
+          },
+          { ...basePart(assistantID, "a2"), type: "text", text: "answer" },
+        ],
+      },
+    ]
+    const result = await MessageV2.toModelMessages(input, model)
+    expect(JSON.stringify(result)).toContain("CROSS_MODEL_SIGNED")
   })
 
   test("keeps bedrock signed reasoning under every namespace", async () => {
@@ -967,7 +997,6 @@ describe("session.message-v2.toModelMessage", () => {
         role: "assistant",
         content: [
           { type: "text", text: "done" },
-          { type: "text", text: "thinking" },
           {
             type: "tool-call",
             toolCallId: "call-1",
@@ -1945,6 +1974,21 @@ describe("session.message-v2.fromError", () => {
         message: "123",
       },
     })
+  })
+
+  // 回归: ContextOverflowError 实例必须原样直通,不能被末尾的
+  // `case e instanceof Error` 兜底转成 UnknownError。
+  // 一旦被转成 UnknownError,processor.ts 的
+  // `SessionV1.ContextOverflowError.isInstance(error)` 就匹配不到,预检超限
+  // (llm.ts 抛出的 ContextOverflowError)不再触发自动压缩,而是把消息标成错误
+  // 并返回 "stop" —— 表现为"上下文超限却不压缩"。
+  test("passes ContextOverflowError through unchanged", () => {
+    const input = new SessionV1.ContextOverflowError({ message: "boom" })
+    const result = MessageV2.fromError(input, { providerID })
+
+    expect(result.name).toBe("ContextOverflowError")
+    expect(SessionV1.ContextOverflowError.isInstance(result)).toBe(true)
+    expect((result.data as { message?: string }).message).toBe("boom")
   })
 
   test("serializes tagged errors with their message", () => {

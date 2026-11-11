@@ -365,6 +365,20 @@ const waitForBusy = (sessionID: SessionID, duration: Duration.Input = "2 seconds
     duration,
   )
 
+// 取消传播是异步的:父会话的 abort 事件经 task.ts 的 onAbort 走 EffectBridge.fork,
+// 由另一条 fiber 去 cancel 子会话。父 fiber 结束时子会话的 idle 未必已落地,
+// 因此必须轮询等待而不是立刻断言(否则偶发失败)。
+const waitForIdle = (sessionID: SessionID, duration: Duration.Input = "5 seconds") =>
+  pollWithTimeout(
+    Effect.gen(function* () {
+      const status = yield* SessionStatus.Service
+      const s = yield* status.get(sessionID)
+      return s.type === "idle" ? (true as const) : undefined
+    }),
+    `session ${sessionID} never became idle`,
+    duration,
+  )
+
 const hasBash = Effect.sync(() => Bun.which("bash") !== null)
 
 const deferredAsPromise = <A>(deferred: Deferred.Deferred<A>): PromiseLike<A> => ({
@@ -1550,8 +1564,8 @@ it.instance(
       const exit = yield* Fiber.await(fiber)
       expect(Exit.isSuccess(exit)).toBe(true)
 
-      expect((yield* status.get(chat.id)).type).toBe("idle")
-      expect((yield* status.get(childID)).type).toBe("idle")
+      yield* waitForIdle(chat.id)
+      yield* waitForIdle(childID)
     }),
   10_000,
 )
