@@ -405,10 +405,9 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
         if (part.type === "reasoning") {
           /**
            * 跨模型时不得把 reasoning 当正文重发:它是上一模型的思考过程,不是对话
-           * 内容,而且体积可达请求的 72%(实测 428 条历史里 1,886,249 字符),曾把
-           * 压缩请求推到 930,741 tokens、下一次主请求 998,919 超过 968,000 上限,
-           * 表现为"压缩后上下文不缩小"。只保留可重放的签名推理(部分 provider 要求
-           * 回放,否则 400),其余一律丢弃。
+           * 内容。reasoning 文本体积可占请求的绝大部分,当正文重发会把请求推过模型
+           * 上下文上限,表现为"压缩后上下文不缩小"。只保留可重放的签名推理(部分
+           * provider 要求回放,否则 400),其余一律丢弃。
            */
           if (!isReplayableReasoning(part.metadata)) continue
           assistantMessage.parts.push({
@@ -722,7 +721,7 @@ export function fromError(
      * 兜底会把它转成 NamedError.Unknown,processor.ts:621 的
      * `SessionV1.ContextOverflowError.isInstance(error)` 就匹配不到,于是
      * 预检超限(llm.ts:149 抛出)不再触发自动压缩,而是直接把消息标成错误并返回
-     * "stop"。实测该路径使 "stop after token overflow requests compaction" 失败。
+     * "stop"。
      */
     case SessionV1.ContextOverflowError.isInstance(e):
       return e
