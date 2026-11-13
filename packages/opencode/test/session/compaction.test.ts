@@ -81,7 +81,7 @@ function createModel(opts: {
       input: { text: true, image: false, audio: false, video: false },
       output: { text: true, image: false, audio: false, video: false },
     },
-    api: { npm: opts.npm ?? "@ai-sdk/anthropic" },
+    api: { id: "test-model", url: "https://example.com", npm: opts.npm ?? "@ai-sdk/anthropic" },
     options: {},
   } as Provider.Model
 }
@@ -365,6 +365,45 @@ function autocontinue(enabled: boolean) {
   })
 }
 
+function systemTransform(block: string) {
+  return Layer.mock(Plugin.Service)({
+    trigger: <Name extends string, Input, Output>(name: Name, _input: Input, output: Output) => {
+      if (name !== "experimental.chat.system.transform") return Effect.succeed(output)
+      return Effect.sync(() => {
+        ;(output as { system: string[] }).system.push(block)
+        return output
+      })
+    },
+    list: () => Effect.succeed([]),
+    init: () => Effect.void,
+  })
+}
+
+/**
+ * 与生产插件同款的守卫:system 元素必须先收窄为字符串。
+ * 用于钉住「把 string[] 当元素传入 system.transform」这类崩溃。
+ */
+const systemGuardStats = { triggers: 0, blocks: 0, nonStrings: 0 }
+function systemGuard() {
+  return Layer.mock(Plugin.Service)({
+    trigger: <Name extends string, Input, Output>(name: Name, _input: Input, output: Output) => {
+      if (name !== "experimental.chat.system.transform") return Effect.succeed(output)
+      return Effect.sync(() => {
+        systemGuardStats.triggers++
+        for (const block of (output as { system: string[] }).system) {
+          systemGuardStats.blocks++
+          if (typeof block !== "string") {
+            systemGuardStats.nonStrings++
+            throw new TypeError("system block must be a string")
+          }
+        }
+        return output
+      })
+    },
+    list: () => Effect.succeed([]),
+    init: () => Effect.void,
+  })
+}
 function compactionContext(context: string) {
   return Layer.mock(Plugin.Service)({
     trigger: <Name extends string, Input, Output>(name: Name, _input: Input, output: Output) => {
@@ -1732,7 +1771,9 @@ describe("session.compaction.process", () => {
         withCompaction({
           llm: stub.llmLayer,
           config: cfg({ tail_turns: 0 }),
-          provider: ProviderTest.fake({ model: createModel({ context: 4_000, output: 1_000 }) }),
+          // 预算必须容得下固定 system(agent/provider 提示词约 2.7K tokens)+ 保留项,
+          // 否则裁剪会连 middle/latest 一起删掉,测不到"只裁最旧回合"的语义。
+          provider: ProviderTest.fake({ model: createModel({ context: 8_000, output: 1_000 }) }),
         }),
       )
     },
@@ -1919,7 +1960,7 @@ describe("session.compaction.process", () => {
       )
       // provider 能返回两个模型:父请求用 test-model,压缩配成 other-model。
       const parentModel = createModel({ context: 100_000, output: 32_000 })
-      const otherModel = { ...parentModel, id: "other-model" }
+      const otherModel = { ...parentModel, id: "other-model", api: { ...parentModel.api, id: "other-model" } }
       const provider = ProviderTest.fake({
         model: parentModel,
         getModel: Effect.fn("TestProvider.getModel.multi")((providerID, modelID) =>
@@ -1977,7 +2018,7 @@ describe("session.compaction.process", () => {
         }),
       )
       const parentModel = createModel({ context: 100_000, output: 32_000 })
-      const otherModel = { ...parentModel, id: "other-model" }
+      const otherModel = { ...parentModel, id: "other-model", api: { ...parentModel.api, id: "other-model" } }
       const provider = ProviderTest.fake({
         model: parentModel,
         getModel: Effect.fn("TestProvider.getModel.multi2")((providerID, modelID) =>
@@ -2058,6 +2099,74 @@ describe("session.compaction.process", () => {
     { git: true },
   )
 
+  itCompaction.instance(
+    "counts the system blocks added after compaction assembles its estimate",
+    () => {
+      const stub = llm()
+      let sent = false
+      stub.push(
+        reply("summary", () => {
+          sent = true
+        }),
+      )
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "older")
+        yield* createCompactionMarker(session.id)
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        const result = yield* SessionCompaction.use.process({
+          parentID: parent!,
+          messages: msgs,
+          sessionID: session.id,
+          auto: false,
+        })
+
+        // 最终请求的 system 还包含 agent 提示词(或 provider 提示词)与插件经
+        // experimental.chat.system.transform 追加的块。400K ASCII ≈ 125K tokens
+        // 单独就超过 test 模型 100K 上下文预算:估算若漏掉这些块,压缩会放行
+        // 一份必然被 llm 预检拒绝的请求(trim-miss → 上下文超限硬失败)。
+        expect(result).toBe("stop")
+        expect(sent).toBe(false)
+      }).pipe(withCompaction({ llm: stub.llmLayer, plugin: systemTransform("x".repeat(400_000)) }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "passes only strings to the system.transform plugin hook",
+    () => {
+      const stub = llm()
+      stub.push(reply("summary"))
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "hello")
+        yield* createCompactionMarker(session.id)
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        // 生产插件的守卫会对 system 的每个元素调用 startsWith;若估算把
+        // string[] 当元素传入(如 SystemPrompt.provider 的返回值),此处会抛
+        // TypeError 并让整个压缩崩溃。
+        const result = yield* SessionCompaction.use.process({
+          parentID: parent!,
+          messages: msgs,
+          sessionID: session.id,
+          auto: false,
+        })
+        expect(result).toBe("continue")
+        // 计数为 0 说明插件层未注入,用例即红 —— 证明测试真的在钉守卫路径。
+        expect(systemGuardStats.triggers).toBeGreaterThan(0)
+        expect(systemGuardStats.nonStrings).toBe(0)
+      }).pipe(withCompaction({ llm: stub.llmLayer, plugin: systemGuard() }))
+    },
+    { git: true },
+  )
   itCompaction.instance(
     "keeps plugin context outside the serialized conversation",
     () => {

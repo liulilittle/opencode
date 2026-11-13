@@ -22,6 +22,7 @@ import { EventV2Bridge } from "@/event-v2-bridge"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { buildPrompt } from "@opencode-ai/core/session/compaction"
+import { SystemPrompt } from "./system"
 import { SessionCompactionEvent } from "@opencode-ai/schema/session-compaction-event"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 
@@ -459,6 +460,30 @@ const layer = Layer.effect(
       const system = sharedPrefix
         ? [...(input.system ?? [])]
         : (input.system ?? []).map((block) => replaceEnvironmentBlock(block, model))
+      /**
+       * 估算必须按「最终请求」的 system 口径。主请求的 system 由
+       * `LLMRequestPrep.prepare` 组装:`agent.prompt`(为空时用
+       * `SystemPrompt.provider(model)`)+ 调用方 system + `user.system`,之后还要经
+       * `experimental.chat.system.transform` 让插件追加块。只按 `input.system` 估算
+       * 会系统性低估——裁剪提前停在 limit 之下,实际请求仍超限,llm 预检直接抛
+       * ContextOverflowError(表现为"上下文离上限还差很多却超限")。
+       * 这里按同一路径重建一份**只用于估算**的 system(插件钩子作用于副本,
+       * 不改变真实请求)。
+       */
+      // SystemPrompt.provider returns string[] (not a single string): it must be spread.
+      // Putting the array itself as an element makes plugins call .startsWith on an
+      // array and throw TypeError (observed in production).
+      const agentSystem: string[] = agent.prompt ? [agent.prompt] : SystemPrompt.provider(model)
+      const estimateSystem: string[] = [
+        ...agentSystem,
+        ...system,
+        ...(input.requestUser?.system ? [input.requestUser.system] : []),
+      ].filter((block): block is string => typeof block === "string" && block.length > 0)
+      yield* plugin.trigger(
+        "experimental.chat.system.transform",
+        { sessionID: input.sessionID, model, agent },
+        { system: estimateSystem },
+      )
       const cfg = yield* config.get()
       const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
       const prior = completedCompactions(history)
@@ -528,10 +553,12 @@ const layer = Layer.effect(
       /**
        * 必须按"最终请求"估算(system + messages + tools),否则加 tools 后低估,
        * 裁剪不足会向 provider 发送超限请求(llm.ts 硬门与 prompt.ts 预检同口径)。
+       * system 必须用 estimateSystem:它含 agent 提示词、user.system 与插件
+       * system.transform 追加块,与真实请求的 system 同口径。
        */
       const estimateRequest = () =>
         estimateRequestTokens({
-          system,
+          system: estimateSystem,
           messages: [...historyMessages, { role: "user", content: [{ type: "text", text: tailText() }] }],
           tools: sharedTools,
         })
